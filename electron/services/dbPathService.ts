@@ -77,8 +77,7 @@ export class DbPathService {
     return (
       existsSync(join(entryPath, 'db_storage')) ||
       existsSync(join(entryPath, 'FileStorage', 'Image')) ||
-      existsSync(join(entryPath, 'FileStorage', 'Image2')) ||
-      existsSync(join(entryPath, 'msg', 'attach'))
+      existsSync(join(entryPath, 'FileStorage', 'Image2'))
     )
   }
 
@@ -95,21 +94,22 @@ export class DbPathService {
       const accountStat = statSync(entryPath)
       let latest = accountStat.mtimeMs
 
-      const checkSubDirs = [
-        'db_storage',
-        join('FileStorage', 'Image'),
-        join('FileStorage', 'Image2'),
-        join('msg', 'attach')
-      ]
+      const dbPath = join(entryPath, 'db_storage')
+      if (existsSync(dbPath)) {
+        const dbStat = statSync(dbPath)
+        latest = Math.max(latest, dbStat.mtimeMs)
+      }
 
-      for (const sub of checkSubDirs) {
-        const fullPath = join(entryPath, sub)
-        if (existsSync(fullPath)) {
-          try {
-            const s = statSync(fullPath)
-            latest = Math.max(latest, s.mtimeMs)
-          } catch { }
-        }
+      const imagePath = join(entryPath, 'FileStorage', 'Image')
+      if (existsSync(imagePath)) {
+        const imageStat = statSync(imagePath)
+        latest = Math.max(latest, imageStat.mtimeMs)
+      }
+
+      const image2Path = join(entryPath, 'FileStorage', 'Image2')
+      if (existsSync(image2Path)) {
+        const image2Stat = statSync(image2Path)
+        latest = Math.max(latest, image2Stat.mtimeMs)
       }
 
       return latest
