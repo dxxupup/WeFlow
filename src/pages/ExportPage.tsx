@@ -1,19 +1,38 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation } from 'react-router-dom'
-import { Search, Download, FolderOpen, RefreshCw, Check, Calendar, FileJson, FileText, Table, Loader2, X, ChevronDown, ChevronLeft, ChevronRight, FileSpreadsheet, Database, FileCode, CheckCircle, XCircle, ExternalLink } from 'lucide-react'
+import {
+  CheckSquare,
+  Download,
+  ExternalLink,
+  FolderOpen,
+  Image as ImageIcon,
+  Loader2,
+  MessageSquareText,
+  Mic,
+  Search,
+  Square,
+  Video,
+  WandSparkles,
+  X
+} from 'lucide-react'
+import type { ChatSession as AppChatSession, ContactInfo } from '../types/models'
+import type { ExportOptions as ElectronExportOptions, ExportProgress } from '../types/electron'
 import * as configService from '../services/config'
 import './ExportPage.scss'
 
-interface ChatSession {
-  username: string
-  displayName?: string
-  avatarUrl?: string
-  summary: string
-  lastTimestamp: number
-}
+type ConversationTab = 'private' | 'group' | 'official'
+type TaskStatus = 'queued' | 'running' | 'success' | 'error'
+type TaskScope = 'single' | 'multi' | 'content'
+type ContentType = 'text' | 'voice' | 'image' | 'video' | 'emoji'
+
+type SessionLayout = 'shared' | 'per-session'
+
+type DisplayNamePreference = 'group-nickname' | 'remark' | 'nickname'
+
+type TextExportFormat = 'chatlab' | 'chatlab-jsonl' | 'json' | 'html' | 'txt' | 'excel' | 'weclone' | 'sql'
 
 interface ExportOptions {
-  format: 'chatlab' | 'chatlab-jsonl' | 'json' | 'html' | 'txt' | 'excel' | 'weclone' | 'sql'
+  format: TextExportFormat
   dateRange: { start: Date; end: Date } | null
   useAllTime: boolean
   exportAvatars: boolean
@@ -25,61 +44,211 @@ interface ExportOptions {
   exportVoiceAsText: boolean
   excelCompactColumns: boolean
   txtColumns: string[]
-  displayNamePreference: 'group-nickname' | 'remark' | 'nickname'
+  displayNamePreference: DisplayNamePreference
   exportConcurrency: number
 }
 
-interface ExportResult {
-  success: boolean
-  successCount?: number
-  failCount?: number
-  error?: string
+interface SessionRow extends AppChatSession {
+  kind: ConversationTab
+  wechatId?: string
 }
 
-type SessionLayout = 'shared' | 'per-session'
+interface SessionMetrics {
+  totalMessages?: number
+  voiceMessages?: number
+  imageMessages?: number
+  videoMessages?: number
+  emojiMessages?: number
+  privateMutualGroups?: number
+  groupMemberCount?: number
+  groupMyMessages?: number
+  groupActiveSpeakers?: number
+  groupMutualFriends?: number
+  firstTimestamp?: number
+  lastTimestamp?: number
+}
+
+interface TaskProgress {
+  current: number
+  total: number
+  currentName: string
+  phaseLabel: string
+  phaseProgress: number
+  phaseTotal: number
+}
+
+interface ExportTaskPayload {
+  sessionIds: string[]
+  outputDir: string
+  options: ElectronExportOptions
+  scope: TaskScope
+  contentType?: ContentType
+  sessionNames: string[]
+}
+
+interface ExportTask {
+  id: string
+  title: string
+  status: TaskStatus
+  createdAt: number
+  startedAt?: number
+  finishedAt?: number
+  error?: string
+  payload: ExportTaskPayload
+  progress: TaskProgress
+}
+
+interface ExportDialogState {
+  open: boolean
+  scope: TaskScope
+  contentType?: ContentType
+  sessionIds: string[]
+  sessionNames: string[]
+  title: string
+}
+
+interface CurrentUserProfile {
+  wxid: string
+  displayName: string
+  avatarUrl?: string
+}
+
+const defaultTxtColumns = ['index', 'time', 'senderRole', 'messageType', 'content']
+const contentTypeLabels: Record<ContentType, string> = {
+  text: '聊天文本',
+  voice: '语音',
+  image: '图片',
+  video: '视频',
+  emoji: '表情包'
+}
+
+const formatOptions: Array<{ value: TextExportFormat; label: string; desc: string }> = [
+  { value: 'chatlab', label: 'ChatLab', desc: '标准格式，支持其他软件导入' },
+  { value: 'chatlab-jsonl', label: 'ChatLab JSONL', desc: '流式格式，适合大量消息' },
+  { value: 'json', label: 'JSON', desc: '详细格式，包含完整消息信息' },
+  { value: 'html', label: 'HTML', desc: '网页格式，可直接浏览' },
+  { value: 'txt', label: 'TXT', desc: '纯文本，通用格式' },
+  { value: 'excel', label: 'Excel', desc: '电子表格，适合统计分析' },
+  { value: 'weclone', label: 'WeClone CSV', desc: 'WeClone 兼容字段格式（CSV）' },
+  { value: 'sql', label: 'PostgreSQL', desc: '数据库脚本，便于导入到数据库' }
+]
+
+const displayNameOptions: Array<{ value: DisplayNamePreference; label: string; desc: string }> = [
+  { value: 'group-nickname', label: '群昵称优先', desc: '仅群聊有效，私聊显示备注/昵称' },
+  { value: 'remark', label: '备注优先', desc: '有备注显示备注，否则显示昵称' },
+  { value: 'nickname', label: '微信昵称', desc: '始终显示微信昵称' }
+]
+
+const writeLayoutOptions: Array<{ value: configService.ExportWriteLayout; label: string; desc: string }> = [
+  {
+    value: 'A',
+    label: 'A（类型分目录）',
+    desc: '聊天文本、语音、视频、表情包、图片分别创建文件夹'
+  },
+  {
+    value: 'B',
+    label: 'B（文本根目录+媒体按会话）',
+    desc: '聊天文本在根目录；媒体按类型目录后再按会话分目录'
+  },
+  {
+    value: 'C',
+    label: 'C（按会话分目录）',
+    desc: '每个会话一个目录，目录内包含文本与媒体文件'
+  }
+]
+
+const createEmptyProgress = (): TaskProgress => ({
+  current: 0,
+  total: 0,
+  currentName: '',
+  phaseLabel: '',
+  phaseProgress: 0,
+  phaseTotal: 0
+})
+
+const formatAbsoluteDate = (timestamp: number): string => {
+  const d = new Date(timestamp)
+  const y = d.getFullYear()
+  const m = `${d.getMonth() + 1}`.padStart(2, '0')
+  const day = `${d.getDate()}`.padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+const formatRecentExportTime = (timestamp?: number, now = Date.now()): string => {
+  if (!timestamp) return '未导出'
+  const diff = Math.max(0, now - timestamp)
+  const minute = 60 * 1000
+  const hour = 60 * minute
+  const day = 24 * hour
+  if (diff < hour) {
+    const minutes = Math.max(1, Math.floor(diff / minute))
+    return `${minutes} 分钟前`
+  }
+  if (diff < day) {
+    const hours = Math.max(1, Math.floor(diff / hour))
+    return `${hours} 小时前`
+  }
+  return formatAbsoluteDate(timestamp)
+}
+
+const formatDateInputValue = (date: Date): string => {
+  const y = date.getFullYear()
+  const m = `${date.getMonth() + 1}`.padStart(2, '0')
+  const d = `${date.getDate()}`.padStart(2, '0')
+  return `${y}-${m}-${d}`
+}
+
+const parseDateInput = (value: string, endOfDay: boolean): Date => {
+  const [year, month, day] = value.split('-').map(v => Number(v))
+  const date = new Date(year, month - 1, day)
+  if (endOfDay) {
+    date.setHours(23, 59, 59, 999)
+  } else {
+    date.setHours(0, 0, 0, 0)
+  }
+  return date
+}
+
+const toKindByContactType = (session: AppChatSession, contact?: ContactInfo): ConversationTab => {
+  if (session.username.endsWith('@chatroom')) return 'group'
+  if (contact?.type === 'official') return 'official'
+  return 'private'
+}
+
+const getAvatarLetter = (name: string): string => {
+  if (!name) return '?'
+  return [...name][0] || '?'
+}
+
+const valueOrDash = (value?: number): string => {
+  if (value === undefined || value === null) return '--'
+  return value.toLocaleString()
+}
+
+const timestampOrDash = (timestamp?: number): string => {
+  if (!timestamp) return '--'
+  return formatAbsoluteDate(timestamp * 1000)
+}
+
+const createTaskId = (): string => `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
 function ExportPage() {
   const location = useLocation()
-  const defaultTxtColumns = ['index', 'time', 'senderRole', 'messageType', 'content']
-  const [sessions, setSessions] = useState<ChatSession[]>([])
-  const [filteredSessions, setFilteredSessions] = useState<ChatSession[]>([])
-  const [selectedSessions, setSelectedSessions] = useState<Set<string>>(new Set())
+
   const [isLoading, setIsLoading] = useState(true)
+  const [sessions, setSessions] = useState<SessionRow[]>([])
+  const [contactMap, setContactMap] = useState<Record<string, ContactInfo>>({})
+  const [groupMemberCountMap, setGroupMemberCountMap] = useState<Record<string, number>>({})
+  const [sessionMetrics, setSessionMetrics] = useState<Record<string, SessionMetrics>>({})
   const [searchKeyword, setSearchKeyword] = useState('')
-  const [exportFolder, setExportFolder] = useState<string>('')
-  const [isExporting, setIsExporting] = useState(false)
-  const [exportProgress, setExportProgress] = useState({ current: 0, total: 0, currentName: '', phaseLabel: '', phaseProgress: 0, phaseTotal: 0 })
-  const [exportResult, setExportResult] = useState<ExportResult | null>(null)
-  const [showDatePicker, setShowDatePicker] = useState(false)
-  const [calendarDate, setCalendarDate] = useState(new Date())
-  const [selectingStart, setSelectingStart] = useState(true)
-  const [showYearMonthPicker, setShowYearMonthPicker] = useState(false)
-  const [showMediaLayoutPrompt, setShowMediaLayoutPrompt] = useState(false)
-  const [showDisplayNameSelect, setShowDisplayNameSelect] = useState(false)
-  const [showPreExportDialog, setShowPreExportDialog] = useState(false)
-  const [preExportStats, setPreExportStats] = useState<{
-    totalMessages: number; voiceMessages: number; cachedVoiceCount: number;
-    needTranscribeCount: number; mediaMessages: number; estimatedSeconds: number
-  } | null>(null)
-  const [isLoadingStats, setIsLoadingStats] = useState(false)
-  const [pendingLayout, setPendingLayout] = useState<SessionLayout>('shared')
-  const exportStartTime = useRef<number>(0)
-  const [elapsedSeconds, setElapsedSeconds] = useState(0)
-  const displayNameDropdownRef = useRef<HTMLDivElement>(null)
-  const preselectAppliedRef = useRef(false)
-  const statsRequestIdRef = useRef(0)
+  const [activeTab, setActiveTab] = useState<ConversationTab>('private')
+  const [selectedSessions, setSelectedSessions] = useState<Set<string>>(new Set())
 
-  const preselectSessionIds = useMemo(() => {
-    const state = location.state as { preselectSessionIds?: unknown; preselectSessionId?: unknown } | null
-    const rawList = Array.isArray(state?.preselectSessionIds)
-      ? state?.preselectSessionIds
-      : (typeof state?.preselectSessionId === 'string' ? [state.preselectSessionId] : [])
+  const [currentUser, setCurrentUser] = useState<CurrentUserProfile>({ wxid: '', displayName: '未识别用户' })
 
-    return rawList
-      .filter((item): item is string => typeof item === 'string')
-      .map(item => item.trim())
-      .filter(Boolean)
-  }, [location.state])
+  const [exportFolder, setExportFolder] = useState('')
+  const [writeLayout, setWriteLayout] = useState<configService.ExportWriteLayout>('A')
+  const [showWriteLayoutSelect, setShowWriteLayoutSelect] = useState(false)
 
   const [options, setOptions] = useState<ExportOptions>({
     format: 'excel',
@@ -101,105 +270,170 @@ function ExportPage() {
     exportConcurrency: 2
   })
 
-  const buildDateRangeFromPreset = (preset: string) => {
-    const now = new Date()
-    if (preset === 'all') {
-      return { useAllTime: true, dateRange: { start: now, end: now } }
-    }
-    let rangeMs = 0
-    if (preset === '7d') rangeMs = 7 * 24 * 60 * 60 * 1000
-    if (preset === '30d') rangeMs = 30 * 24 * 60 * 60 * 1000
-    if (preset === '90d') rangeMs = 90 * 24 * 60 * 60 * 1000
-    if (preset === 'today' || rangeMs === 0) {
-      const start = new Date(now)
-      start.setHours(0, 0, 0, 0)
-      return { useAllTime: false, dateRange: { start, end: now } }
-    }
-    const start = new Date(now.getTime() - rangeMs)
-    start.setHours(0, 0, 0, 0)
-    return { useAllTime: false, dateRange: { start, end: now } }
-  }
+  const [exportDialog, setExportDialog] = useState<ExportDialogState>({
+    open: false,
+    scope: 'single',
+    sessionIds: [],
+    sessionNames: [],
+    title: ''
+  })
 
-  const loadSessions = useCallback(async () => {
-    setIsLoading(true)
+  const [tasks, setTasks] = useState<ExportTask[]>([])
+  const [lastExportBySession, setLastExportBySession] = useState<Record<string, number>>({})
+  const [lastExportByContent, setLastExportByContent] = useState<Record<string, number>>({})
+  const [nowTick, setNowTick] = useState(Date.now())
+
+  const progressUnsubscribeRef = useRef<(() => void) | null>(null)
+  const runningTaskIdRef = useRef<string | null>(null)
+  const tasksRef = useRef<ExportTask[]>([])
+  const loadingMetricsRef = useRef<Set<string>>(new Set())
+  const preselectAppliedRef = useRef(false)
+
+  useEffect(() => {
+    tasksRef.current = tasks
+  }, [tasks])
+
+  const preselectSessionIds = useMemo(() => {
+    const state = location.state as { preselectSessionIds?: unknown; preselectSessionId?: unknown } | null
+    const rawList = Array.isArray(state?.preselectSessionIds)
+      ? state?.preselectSessionIds
+      : (typeof state?.preselectSessionId === 'string' ? [state.preselectSessionId] : [])
+
+    return rawList
+      .filter((item): item is string => typeof item === 'string')
+      .map(item => item.trim())
+      .filter(Boolean)
+  }, [location.state])
+
+  useEffect(() => {
+    const timer = setInterval(() => setNowTick(Date.now()), 60 * 1000)
+    return () => clearInterval(timer)
+  }, [])
+
+  const loadCurrentUser = useCallback(async () => {
     try {
-      const result = await window.electronAPI.chat.connect()
-      if (!result.success) {
-        console.error('连接失败:', result.error)
-        setIsLoading(false)
-        return
+      const wxid = await configService.getMyWxid()
+      let displayName = wxid || '未识别用户'
+      let avatarUrl: string | undefined
+
+      if (wxid) {
+        const myContact = await window.electronAPI.chat.getContact(wxid)
+        const bestName = [myContact?.remark, myContact?.nickName, myContact?.alias, wxid].find(Boolean)
+        if (bestName) displayName = bestName
       }
-      const sessionsResult = await window.electronAPI.chat.getSessions()
-      if (sessionsResult.success && sessionsResult.sessions) {
-        setSessions(sessionsResult.sessions)
-        setFilteredSessions(sessionsResult.sessions)
+
+      const avatarResult = await window.electronAPI.chat.getMyAvatarUrl()
+      if (avatarResult.success && avatarResult.avatarUrl) {
+        avatarUrl = avatarResult.avatarUrl
       }
-    } catch (e) {
-      console.error('加载会话失败:', e)
-    } finally {
-      setIsLoading(false)
+
+      setCurrentUser({ wxid: wxid || '', displayName, avatarUrl })
+    } catch (error) {
+      console.error('加载当前用户信息失败:', error)
     }
   }, [])
 
-  const loadExportPath = useCallback(async () => {
+  const loadBaseConfig = useCallback(async () => {
     try {
-      const savedPath = await configService.getExportPath()
+      const [savedPath, savedFormat, savedMedia, savedVoiceAsText, savedExcelCompactColumns, savedTxtColumns, savedConcurrency, savedWriteLayout, savedSessionMap, savedContentMap] = await Promise.all([
+        configService.getExportPath(),
+        configService.getExportDefaultFormat(),
+        configService.getExportDefaultMedia(),
+        configService.getExportDefaultVoiceAsText(),
+        configService.getExportDefaultExcelCompactColumns(),
+        configService.getExportDefaultTxtColumns(),
+        configService.getExportDefaultConcurrency(),
+        configService.getExportWriteLayout(),
+        configService.getExportLastSessionRunMap(),
+        configService.getExportLastContentRunMap()
+      ])
+
       if (savedPath) {
         setExportFolder(savedPath)
       } else {
         const downloadsPath = await window.electronAPI.app.getDownloadsPath()
         setExportFolder(downloadsPath)
       }
-    } catch (e) {
-      console.error('加载导出路径失败:', e)
+
+      setWriteLayout(savedWriteLayout)
+      setLastExportBySession(savedSessionMap)
+      setLastExportByContent(savedContentMap)
+
+      const txtColumns = savedTxtColumns && savedTxtColumns.length > 0 ? savedTxtColumns : defaultTxtColumns
+      setOptions(prev => ({
+        ...prev,
+        format: (savedFormat as TextExportFormat) || prev.format,
+        exportMedia: savedMedia ?? prev.exportMedia,
+        exportVoiceAsText: savedVoiceAsText ?? prev.exportVoiceAsText,
+        excelCompactColumns: savedExcelCompactColumns ?? prev.excelCompactColumns,
+        txtColumns,
+        exportConcurrency: savedConcurrency ?? prev.exportConcurrency
+      }))
+    } catch (error) {
+      console.error('加载导出配置失败:', error)
     }
   }, [])
 
-  const loadExportDefaults = useCallback(async () => {
+  const loadSessions = useCallback(async () => {
+    setIsLoading(true)
     try {
-      const [
-        savedFormat,
-        savedRange,
-        savedMedia,
-        savedVoiceAsText,
-        savedExcelCompactColumns,
-        savedTxtColumns,
-        savedConcurrency
-      ] = await Promise.all([
-        configService.getExportDefaultFormat(),
-        configService.getExportDefaultDateRange(),
-        configService.getExportDefaultMedia(),
-        configService.getExportDefaultVoiceAsText(),
-        configService.getExportDefaultExcelCompactColumns(),
-        configService.getExportDefaultTxtColumns(),
-        configService.getExportDefaultConcurrency()
+      const connectResult = await window.electronAPI.chat.connect()
+      if (!connectResult.success) {
+        console.error('连接失败:', connectResult.error)
+        setIsLoading(false)
+        return
+      }
+
+      const [sessionsResult, contactsResult, groupChatsResult] = await Promise.all([
+        window.electronAPI.chat.getSessions(),
+        window.electronAPI.chat.getContacts(),
+        window.electronAPI.groupAnalytics.getGroupChats()
       ])
 
-      const preset = savedRange || 'today'
-      const rangeDefaults = buildDateRangeFromPreset(preset)
-      const txtColumns = savedTxtColumns && savedTxtColumns.length > 0 ? savedTxtColumns : defaultTxtColumns
+      const contacts: ContactInfo[] = contactsResult.success && contactsResult.contacts ? contactsResult.contacts : []
+      const nextContactMap = contacts.reduce<Record<string, ContactInfo>>((map, contact) => {
+        map[contact.username] = contact
+        return map
+      }, {})
+      setContactMap(nextContactMap)
 
-      setOptions((prev) => ({
-        ...prev,
-        format: (savedFormat as ExportOptions['format']) || 'excel',
-        useAllTime: rangeDefaults.useAllTime,
-        dateRange: rangeDefaults.dateRange,
-        exportMedia: savedMedia ?? false,
-        exportVoiceAsText: savedVoiceAsText ?? false,
-        excelCompactColumns: savedExcelCompactColumns ?? true,
-        txtColumns,
-        exportConcurrency: savedConcurrency ?? 2
-      }))
-    } catch (e) {
-      console.error('加载导出默认设置失败:', e)
+      const nextGroupMemberCountMap: Record<string, number> = {}
+      if (groupChatsResult.success && groupChatsResult.data) {
+        for (const group of groupChatsResult.data) {
+          nextGroupMemberCountMap[group.username] = group.memberCount
+        }
+      }
+      setGroupMemberCountMap(nextGroupMemberCountMap)
+
+      if (sessionsResult.success && sessionsResult.sessions) {
+        const nextSessions = sessionsResult.sessions
+          .map((session) => {
+            const contact = nextContactMap[session.username]
+            const kind = toKindByContactType(session, contact)
+            return {
+              ...session,
+              kind,
+              wechatId: contact?.username || session.username,
+              displayName: session.displayName || contact?.displayName || session.username,
+              avatarUrl: session.avatarUrl || contact?.avatarUrl
+            } as SessionRow
+          })
+          .sort((a, b) => (b.sortTimestamp || b.lastTimestamp || 0) - (a.sortTimestamp || a.lastTimestamp || 0))
+
+        setSessions(nextSessions)
+      }
+    } catch (error) {
+      console.error('加载会话失败:', error)
+    } finally {
+      setIsLoading(false)
     }
   }, [])
 
   useEffect(() => {
+    loadCurrentUser()
+    loadBaseConfig()
     loadSessions()
-    loadExportPath()
-    loadExportDefaults()
-  }, [loadSessions, loadExportPath, loadExportDefaults])
+  }, [loadCurrentUser, loadBaseConfig, loadSessions])
 
   useEffect(() => {
     preselectAppliedRef.current = false
@@ -215,398 +449,757 @@ function ExportPage() {
 
     if (matched.length > 0) {
       setSelectedSessions(new Set(matched))
-      setSearchKeyword('')
     }
   }, [sessions, preselectSessionIds])
 
-  useEffect(() => {
-    const handleChange = () => {
-      setSelectedSessions(new Set())
-      setSearchKeyword('')
-      setExportResult(null)
-      setSessions([])
-      setFilteredSessions([])
-      loadSessions()
-    }
-    window.addEventListener('wxid-changed', handleChange as EventListener)
-    return () => window.removeEventListener('wxid-changed', handleChange as EventListener)
-  }, [loadSessions])
-
-  useEffect(() => {
-    const removeListener = window.electronAPI.export.onProgress?.((payload: { current: number; total: number; currentSession: string; phase: string; phaseProgress?: number; phaseTotal?: number; phaseLabel?: string }) => {
-      setExportProgress({
-        current: payload.current,
-        total: payload.total,
-        currentName: payload.currentSession,
-        phaseLabel: payload.phaseLabel || '',
-        phaseProgress: payload.phaseProgress || 0,
-        phaseTotal: payload.phaseTotal || 0
-      })
+  const visibleSessions = useMemo(() => {
+    const keyword = searchKeyword.trim().toLowerCase()
+    return sessions.filter((session) => {
+      if (session.kind !== activeTab) return false
+      if (!keyword) return true
+      return (
+        (session.displayName || '').toLowerCase().includes(keyword) ||
+        session.username.toLowerCase().includes(keyword)
+      )
     })
-    return () => {
-      removeListener?.()
+  }, [sessions, activeTab, searchKeyword])
+
+  const ensureSessionMetrics = useCallback(async (targetSessions: SessionRow[]) => {
+    const pending = targetSessions.filter(session => !sessionMetrics[session.username] && !loadingMetricsRef.current.has(session.username))
+    if (pending.length === 0) return
+
+    for (const session of pending) {
+      loadingMetricsRef.current.add(session.username)
     }
-  }, [])
 
-  // 导出计时器
-  useEffect(() => {
-    if (!isExporting) return
-    const timer = setInterval(() => {
-      setElapsedSeconds(Math.floor((Date.now() - exportStartTime.current) / 1000))
-    }, 1000)
-    return () => clearInterval(timer)
-  }, [isExporting])
+    const updates: Record<string, SessionMetrics> = {}
 
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      const target = event.target as Node
-      if (showDisplayNameSelect && displayNameDropdownRef.current && !displayNameDropdownRef.current.contains(target)) {
-        setShowDisplayNameSelect(false)
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [showDisplayNameSelect])
+    for (const session of pending) {
+      const metrics: SessionMetrics = {}
+      try {
+        const detailResult = await window.electronAPI.chat.getSessionDetail(session.username)
+        if (detailResult.success && detailResult.detail) {
+          metrics.totalMessages = detailResult.detail.messageCount
+          metrics.firstTimestamp = detailResult.detail.firstMessageTime
+          metrics.lastTimestamp = detailResult.detail.latestMessageTime
+        }
 
-  useEffect(() => {
-    if (!searchKeyword.trim()) {
-      setFilteredSessions(sessions)
-      return
-    }
-    const lower = searchKeyword.toLowerCase()
-    setFilteredSessions(sessions.filter(s =>
-      s.displayName?.toLowerCase().includes(lower) ||
-      s.username.toLowerCase().includes(lower)
-    ))
-  }, [searchKeyword, sessions])
-
-  const toggleSession = (username: string) => {
-    const newSet = new Set(selectedSessions)
-    if (newSet.has(username)) {
-      newSet.delete(username)
-    } else {
-      newSet.add(username)
-    }
-    setSelectedSessions(newSet)
-  }
-
-  const toggleSelectAll = () => {
-    if (selectedSessions.size === filteredSessions.length) {
-      setSelectedSessions(new Set())
-    } else {
-      setSelectedSessions(new Set(filteredSessions.map(s => s.username)))
-    }
-  }
-
-  const getAvatarLetter = (name: string) => {
-    if (!name) return '?'
-    return [...name][0] || '?'
-  }
-
-  const formatDate = (date: Date) => {
-    return date.toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' })
-  }
-
-  const handleFormatChange = (format: ExportOptions['format']) => {
-    setOptions((prev) => {
-      const next = { ...prev, format }
-      if (format === 'html') {
-        return {
-          ...next,
+        const exportStats = await window.electronAPI.export.getExportStats([session.username], {
+          exportVoiceAsText: false,
           exportMedia: true,
           exportImages: true,
           exportVoices: true,
           exportVideos: true,
-          exportEmojis: true
+          exportEmojis: true,
+          dateRange: null
+        })
+        metrics.voiceMessages = exportStats.voiceMessages
+        if (metrics.totalMessages === undefined) {
+          metrics.totalMessages = exportStats.totalMessages
+        }
+
+        if (session.kind === 'group') {
+          metrics.groupMemberCount = groupMemberCountMap[session.username]
+
+          const [mediaStatsResult, rankingResult] = await Promise.all([
+            window.electronAPI.groupAnalytics.getGroupMediaStats(session.username),
+            window.electronAPI.groupAnalytics.getGroupMessageRanking(session.username)
+          ])
+
+          if (mediaStatsResult.success && mediaStatsResult.data?.typeCounts) {
+            for (const item of mediaStatsResult.data.typeCounts) {
+              const n = item.name.toLowerCase()
+              if (n.includes('图片')) metrics.imageMessages = item.count
+              if (n.includes('视频')) metrics.videoMessages = item.count
+              if (n.includes('语音')) metrics.voiceMessages = item.count
+              if (n.includes('表情')) metrics.emojiMessages = item.count
+            }
+          }
+
+          if (rankingResult.success && rankingResult.data) {
+            metrics.groupActiveSpeakers = rankingResult.data.length
+            const selfWxid = session.selfWxid || currentUser.wxid
+            const me = rankingResult.data.find(item => item.member.username === selfWxid)
+            if (me) {
+              metrics.groupMyMessages = me.messageCount
+            }
+          }
+        }
+      } catch (error) {
+        console.error('加载会话统计失败:', session.username, error)
+      } finally {
+        loadingMetricsRef.current.delete(session.username)
+      }
+
+      updates[session.username] = metrics
+    }
+
+    if (Object.keys(updates).length > 0) {
+      setSessionMetrics(prev => ({ ...prev, ...updates }))
+    }
+  }, [sessionMetrics, groupMemberCountMap, currentUser.wxid])
+
+  useEffect(() => {
+    const targets = visibleSessions.slice(0, 40)
+    void ensureSessionMetrics(targets)
+  }, [visibleSessions, ensureSessionMetrics])
+
+  const selectedCount = selectedSessions.size
+
+  const toggleSelectSession = (sessionId: string) => {
+    setSelectedSessions(prev => {
+      const next = new Set(prev)
+      if (next.has(sessionId)) {
+        next.delete(sessionId)
+      } else {
+        next.add(sessionId)
+      }
+      return next
+    })
+  }
+
+  const toggleSelectAllVisible = () => {
+    const visibleIds = visibleSessions.map(session => session.username)
+    if (visibleIds.length === 0) return
+
+    setSelectedSessions(prev => {
+      const next = new Set(prev)
+      const allSelected = visibleIds.every(id => next.has(id))
+      if (allSelected) {
+        for (const id of visibleIds) {
+          next.delete(id)
+        }
+      } else {
+        for (const id of visibleIds) {
+          next.add(id)
         }
       }
       return next
     })
   }
 
-  const openExportFolder = async () => {
-    if (exportFolder) {
-      await window.electronAPI.shell.openPath(exportFolder)
-    }
-  }
+  const clearSelection = () => setSelectedSessions(new Set())
 
-  const runExport = async (sessionLayout: SessionLayout) => {
-    if (selectedSessions.size === 0 || !exportFolder) return
+  const openExportDialog = (payload: Omit<ExportDialogState, 'open'>) => {
+    setExportDialog({ open: true, ...payload })
 
-    setIsExporting(true)
-    setExportProgress({ current: 0, total: selectedSessions.size, currentName: '', phaseLabel: '', phaseProgress: 0, phaseTotal: 0 })
-    setExportResult(null)
-    exportStartTime.current = Date.now()
-    setElapsedSeconds(0)
-
-    try {
-      const sessionList = Array.from(selectedSessions)
-      const exportOptions = {
-        format: options.format,
-        exportAvatars: options.exportAvatars,
-        exportMedia: options.exportMedia,
-        exportImages: options.exportMedia && options.exportImages,
-        exportVoices: options.exportMedia && options.exportVoices,
-        exportVideos: options.exportMedia && options.exportVideos,
-        exportEmojis: options.exportMedia && options.exportEmojis,
-        exportVoiceAsText: options.exportVoiceAsText,  // 即使不导出媒体，也可以导出语音转文字内容
-        excelCompactColumns: options.excelCompactColumns,
-        txtColumns: options.txtColumns,
-        displayNamePreference: options.displayNamePreference,
-        exportConcurrency: options.exportConcurrency,
-        sessionLayout,
-        dateRange: options.useAllTime ? null : options.dateRange ? {
-          start: Math.floor(options.dateRange.start.getTime() / 1000),
-          // 将结束日期设置为当天的 23:59:59，确保包含当天的所有记录
-          end: Math.floor(new Date(options.dateRange.end.getFullYear(), options.dateRange.end.getMonth(), options.dateRange.end.getDate(), 23, 59, 59).getTime() / 1000)
-        } : null
-      }
-
-      if (options.format === 'chatlab' || options.format === 'chatlab-jsonl' || options.format === 'json' || options.format === 'excel' || options.format === 'txt' || options.format === 'html' || options.format === 'weclone') {
-        const result = await window.electronAPI.export.exportSessions(
-          sessionList,
-          exportFolder,
-          exportOptions
-        )
-        setExportResult(result)
+    if (payload.scope === 'content' && payload.contentType) {
+      if (payload.contentType === 'text') {
+        setOptions(prev => ({ ...prev, exportMedia: false }))
       } else {
-        setExportResult({ success: false, error: `${options.format.toUpperCase()} 格式目前暂未实现，请选择其他格式。` })
+        setOptions(prev => ({
+          ...prev,
+          exportMedia: true,
+          exportImages: payload.contentType === 'image',
+          exportVoices: payload.contentType === 'voice',
+          exportVideos: payload.contentType === 'video',
+          exportEmojis: payload.contentType === 'emoji'
+        }))
       }
-    } catch (e) {
-      console.error('导出过程中发生异常:', e)
-      setExportResult({ success: false, error: String(e) })
-    } finally {
-      setIsExporting(false)
     }
   }
 
-  const startExport = async () => {
-    if (selectedSessions.size === 0 || !exportFolder) return
-
-    // 先获取预估统计
-    const requestId = ++statsRequestIdRef.current
-    setIsLoadingStats(true)
-    setPreExportStats(null)
-    setShowPreExportDialog(true)
-    try {
-      const sessionList = Array.from(selectedSessions)
-      const exportOptions = {
-        format: options.format,
-        exportVoiceAsText: options.exportVoiceAsText,
-        exportMedia: options.exportMedia,
-        exportImages: options.exportMedia && options.exportImages,
-        exportVoices: options.exportMedia && options.exportVoices,
-        exportVideos: options.exportMedia && options.exportVideos,
-        exportEmojis: options.exportMedia && options.exportEmojis,
-        dateRange: options.useAllTime ? null : options.dateRange ? {
-          start: Math.floor(options.dateRange.start.getTime() / 1000),
-          end: Math.floor(new Date(options.dateRange.end.getFullYear(), options.dateRange.end.getMonth(), options.dateRange.end.getDate(), 23, 59, 59).getTime() / 1000)
-        } : null
-      }
-      const stats = await window.electronAPI.export.getExportStats(sessionList, exportOptions)
-      if (statsRequestIdRef.current !== requestId) return
-      setPreExportStats(stats)
-    } catch (e) {
-      console.error('获取导出统计失败:', e)
-      if (statsRequestIdRef.current !== requestId) return
-      setPreExportStats(null)
-    } finally {
-      if (statsRequestIdRef.current !== requestId) return
-      setIsLoadingStats(false)
-    }
+  const closeExportDialog = () => {
+    setExportDialog(prev => ({ ...prev, open: false }))
   }
 
-  const confirmExport = () => {
-    statsRequestIdRef.current++
-    setIsLoadingStats(false)
-    setShowPreExportDialog(false)
-    setPreExportStats(null)
+  const buildExportOptions = (scope: TaskScope, contentType?: ContentType): ElectronExportOptions => {
+    const sessionLayout: SessionLayout = writeLayout === 'C' ? 'per-session' : 'shared'
 
-    if (options.exportMedia && selectedSessions.size > 1) {
-      setShowMediaLayoutPrompt(true)
-      return
+    const base: ElectronExportOptions = {
+      format: options.format,
+      exportAvatars: options.exportAvatars,
+      exportMedia: options.exportMedia,
+      exportImages: options.exportMedia && options.exportImages,
+      exportVoices: options.exportMedia && options.exportVoices,
+      exportVideos: options.exportMedia && options.exportVideos,
+      exportEmojis: options.exportMedia && options.exportEmojis,
+      exportVoiceAsText: options.exportVoiceAsText,
+      excelCompactColumns: options.excelCompactColumns,
+      txtColumns: options.txtColumns,
+      displayNamePreference: options.displayNamePreference,
+      exportConcurrency: options.exportConcurrency,
+      sessionLayout,
+      dateRange: options.useAllTime
+        ? null
+        : options.dateRange
+          ? {
+              start: Math.floor(options.dateRange.start.getTime() / 1000),
+              end: Math.floor(options.dateRange.end.getTime() / 1000)
+            }
+          : null
     }
 
-    const layout: SessionLayout = options.exportMedia ? 'per-session' : 'shared'
-    runExport(layout)
-  }
-
-  const getDaysInMonth = (date: Date) => {
-    const year = date.getFullYear()
-    const month = date.getMonth()
-    return new Date(year, month + 1, 0).getDate()
-  }
-
-  const getFirstDayOfMonth = (date: Date) => {
-    const year = date.getFullYear()
-    const month = date.getMonth()
-    return new Date(year, month, 1).getDay()
-  }
-
-  const generateCalendar = () => {
-    const daysInMonth = getDaysInMonth(calendarDate)
-    const firstDay = getFirstDayOfMonth(calendarDate)
-    const days: (number | null)[] = []
-
-    for (let i = 0; i < firstDay; i++) {
-      days.push(null)
-    }
-
-    for (let i = 1; i <= daysInMonth; i++) {
-      days.push(i)
-    }
-
-    return days
-  }
-
-  const handleDateSelect = (day: number) => {
-    const year = calendarDate.getFullYear()
-    const month = calendarDate.getMonth()
-    const selectedDate = new Date(year, month, day)
-    // 设置时间为当天的开始或结束
-    selectedDate.setHours(selectingStart ? 0 : 23, selectingStart ? 0 : 59, selectingStart ? 0 : 59, selectingStart ? 0 : 999)
-
-    const now = new Date()
-    // 如果选择的日期晚于当前时间，限制为当前时间
-    if (selectedDate > now) {
-      selectedDate.setTime(now.getTime())
-    }
-
-    if (selectingStart) {
-      // 选择开始日期
-      const currentEnd = options.dateRange?.end || new Date()
-      // 如果选择的开始日期晚于结束日期，则同时更新结束日期
-      if (selectedDate > currentEnd) {
-        const newEnd = new Date(selectedDate)
-        newEnd.setHours(23, 59, 59, 999)
-        // 确保结束日期也不晚于当前时间
-        if (newEnd > now) {
-          newEnd.setTime(now.getTime())
+    if (scope === 'content' && contentType) {
+      if (contentType === 'text') {
+        return {
+          ...base,
+          exportMedia: false,
+          exportImages: false,
+          exportVoices: false,
+          exportVideos: false,
+          exportEmojis: false
         }
-        setOptions({
-          ...options,
-          dateRange: { start: selectedDate, end: newEnd }
-        })
-      } else {
-        setOptions({
-          ...options,
-          dateRange: options.dateRange ? { ...options.dateRange, start: selectedDate } : { start: selectedDate, end: new Date() }
-        })
       }
-      setSelectingStart(false)
-    } else {
-      // 选择结束日期
-      const currentStart = options.dateRange?.start || new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
-      // 如果选择的结束日期早于开始日期，则同时更新开始日期
-      if (selectedDate < currentStart) {
-        const newStart = new Date(selectedDate)
-        newStart.setHours(0, 0, 0, 0)
-        setOptions({
-          ...options,
-          dateRange: { start: newStart, end: selectedDate }
-        })
-      } else {
-        setOptions({
-          ...options,
-          dateRange: options.dateRange ? { ...options.dateRange, end: selectedDate } : { start: new Date(), end: selectedDate }
-        })
+
+      return {
+        ...base,
+        exportMedia: true,
+        exportImages: contentType === 'image',
+        exportVoices: contentType === 'voice',
+        exportVideos: contentType === 'video',
+        exportEmojis: contentType === 'emoji'
       }
-      setSelectingStart(true)
     }
+
+    return base
   }
 
-  const formatOptions = [
-    { value: 'chatlab', label: 'ChatLab', icon: FileCode, desc: '标准格式，支持其他软件导入' },
-    { value: 'chatlab-jsonl', label: 'ChatLab JSONL', icon: FileCode, desc: '流式格式，适合大量消息' },
-    { value: 'json', label: 'JSON', icon: FileJson, desc: '详细格式，包含完整消息信息' },
-    { value: 'html', label: 'HTML', icon: FileText, desc: '网页格式，可直接浏览' },
-    { value: 'txt', label: 'TXT', icon: Table, desc: '纯文本，通用格式' },
-    { value: 'excel', label: 'Excel', icon: FileSpreadsheet, desc: '电子表格，适合统计分析' },
-    { value: 'weclone', label: 'WeClone CSV', icon: Table, desc: 'WeClone 兼容字段格式（CSV）' },
-    { value: 'sql', label: 'PostgreSQL', icon: Database, desc: '数据库脚本，便于导入到数据库' }
-  ]
-  const displayNameOptions = [
-    {
-      value: 'group-nickname',
-      label: '群昵称优先',
-      desc: '仅群聊有效，私聊显示备注/昵称'
-    },
-    {
-      value: 'remark',
-      label: '备注优先',
-      desc: '有备注显示备注，否则显示昵称'
-    },
-    {
-      value: 'nickname',
-      label: '微信昵称',
-      desc: '始终显示微信昵称'
+  const markSessionExported = useCallback((sessionIds: string[], timestamp: number) => {
+    setLastExportBySession(prev => {
+      const next = { ...prev }
+      for (const id of sessionIds) {
+        next[id] = timestamp
+      }
+      void configService.setExportLastSessionRunMap(next)
+      return next
+    })
+  }, [])
+
+  const markContentExported = useCallback((sessionIds: string[], contentTypes: ContentType[], timestamp: number) => {
+    setLastExportByContent(prev => {
+      const next = { ...prev }
+      for (const id of sessionIds) {
+        for (const type of contentTypes) {
+          next[`${id}::${type}`] = timestamp
+        }
+      }
+      void configService.setExportLastContentRunMap(next)
+      return next
+    })
+  }, [])
+
+  const inferContentTypesFromOptions = (opts: ElectronExportOptions): ContentType[] => {
+    const types: ContentType[] = ['text']
+    if (opts.exportMedia) {
+      if (opts.exportVoices) types.push('voice')
+      if (opts.exportImages) types.push('image')
+      if (opts.exportVideos) types.push('video')
+      if (opts.exportEmojis) types.push('emoji')
     }
-  ]
-  const displayNameOption = displayNameOptions.find(option => option.value === options.displayNamePreference)
-  const displayNameLabel = displayNameOption?.label || '备注优先'
+    return types
+  }
+
+  const updateTask = useCallback((taskId: string, updater: (task: ExportTask) => ExportTask) => {
+    setTasks(prev => prev.map(task => (task.id === taskId ? updater(task) : task)))
+  }, [])
+
+  const runNextTask = useCallback(async () => {
+    if (runningTaskIdRef.current) return
+
+    const queue = [...tasksRef.current].reverse()
+    const next = queue.find(task => task.status === 'queued')
+    if (!next) return
+
+    runningTaskIdRef.current = next.id
+    updateTask(next.id, task => ({ ...task, status: 'running', startedAt: Date.now() }))
+
+    progressUnsubscribeRef.current?.()
+    progressUnsubscribeRef.current = window.electronAPI.export.onProgress((payload: ExportProgress) => {
+      updateTask(next.id, task => ({
+        ...task,
+        progress: {
+          current: payload.current,
+          total: payload.total,
+          currentName: payload.currentSession,
+          phaseLabel: payload.phaseLabel || '',
+          phaseProgress: payload.phaseProgress || 0,
+          phaseTotal: payload.phaseTotal || 0
+        }
+      }))
+    })
+
+    try {
+      const result = await window.electronAPI.export.exportSessions(
+        next.payload.sessionIds,
+        next.payload.outputDir,
+        next.payload.options
+      )
+
+      if (!result.success) {
+        updateTask(next.id, task => ({
+          ...task,
+          status: 'error',
+          finishedAt: Date.now(),
+          error: result.error || '导出失败'
+        }))
+      } else {
+        const doneAt = Date.now()
+        const contentTypes = next.payload.contentType
+          ? [next.payload.contentType]
+          : inferContentTypesFromOptions(next.payload.options)
+
+        markSessionExported(next.payload.sessionIds, doneAt)
+        markContentExported(next.payload.sessionIds, contentTypes, doneAt)
+
+        updateTask(next.id, task => ({
+          ...task,
+          status: 'success',
+          finishedAt: doneAt,
+          progress: {
+            ...task.progress,
+            current: task.progress.total || next.payload.sessionIds.length,
+            total: task.progress.total || next.payload.sessionIds.length,
+            phaseLabel: '完成',
+            phaseProgress: 1,
+            phaseTotal: 1
+          }
+        }))
+      }
+    } catch (error) {
+      updateTask(next.id, task => ({
+        ...task,
+        status: 'error',
+        finishedAt: Date.now(),
+        error: String(error)
+      }))
+    } finally {
+      progressUnsubscribeRef.current?.()
+      progressUnsubscribeRef.current = null
+      runningTaskIdRef.current = null
+      void runNextTask()
+    }
+  }, [updateTask, markSessionExported, markContentExported])
+
+  useEffect(() => {
+    void runNextTask()
+  }, [tasks, runNextTask])
+
+  useEffect(() => {
+    return () => {
+      progressUnsubscribeRef.current?.()
+      progressUnsubscribeRef.current = null
+    }
+  }, [])
+
+  const createTask = async () => {
+    if (!exportDialog.open || exportDialog.sessionIds.length === 0 || !exportFolder) return
+
+    const exportOptions = buildExportOptions(exportDialog.scope, exportDialog.contentType)
+    const title =
+      exportDialog.scope === 'single'
+        ? `${exportDialog.sessionNames[0] || '会话'} 导出`
+        : exportDialog.scope === 'multi'
+          ? `批量导出（${exportDialog.sessionIds.length} 个会话）`
+          : `${contentTypeLabels[exportDialog.contentType || 'text']}批量导出`
+
+    const task: ExportTask = {
+      id: createTaskId(),
+      title,
+      status: 'queued',
+      createdAt: Date.now(),
+      payload: {
+        sessionIds: exportDialog.sessionIds,
+        sessionNames: exportDialog.sessionNames,
+        outputDir: exportFolder,
+        options: exportOptions,
+        scope: exportDialog.scope,
+        contentType: exportDialog.contentType
+      },
+      progress: createEmptyProgress()
+    }
+
+    setTasks(prev => [task, ...prev])
+    closeExportDialog()
+
+    await configService.setExportDefaultFormat(options.format)
+    await configService.setExportDefaultMedia(options.exportMedia)
+    await configService.setExportDefaultVoiceAsText(options.exportVoiceAsText)
+    await configService.setExportDefaultExcelCompactColumns(options.excelCompactColumns)
+    await configService.setExportDefaultTxtColumns(options.txtColumns)
+    await configService.setExportDefaultConcurrency(options.exportConcurrency)
+  }
+
+  const openSingleExport = (session: SessionRow) => {
+    openExportDialog({
+      scope: 'single',
+      sessionIds: [session.username],
+      sessionNames: [session.displayName || session.username],
+      title: `导出会话：${session.displayName || session.username}`
+    })
+  }
+
+  const openBatchExport = () => {
+    const ids = Array.from(selectedSessions)
+    if (ids.length === 0) return
+    const nameMap = new Map(sessions.map(session => [session.username, session.displayName || session.username]))
+    const names = ids.map(id => nameMap.get(id) || id)
+
+    openExportDialog({
+      scope: 'multi',
+      sessionIds: ids,
+      sessionNames: names,
+      title: `批量导出（${ids.length} 个会话）`
+    })
+  }
+
+  const openContentExport = (contentType: ContentType) => {
+    const ids = sessions
+      .filter(session => session.kind === 'private' || session.kind === 'group')
+      .map(session => session.username)
+
+    const names = sessions
+      .filter(session => session.kind === 'private' || session.kind === 'group')
+      .map(session => session.displayName || session.username)
+
+    openExportDialog({
+      scope: 'content',
+      contentType,
+      sessionIds: ids,
+      sessionNames: names,
+      title: `${contentTypeLabels[contentType]}批量导出`
+    })
+  }
+
+  const runningSessionIds = useMemo(() => {
+    const set = new Set<string>()
+    for (const task of tasks) {
+      if (task.status !== 'running') continue
+      for (const id of task.payload.sessionIds) {
+        set.add(id)
+      }
+    }
+    return set
+  }, [tasks])
+
+  const queuedSessionIds = useMemo(() => {
+    const set = new Set<string>()
+    for (const task of tasks) {
+      if (task.status !== 'queued') continue
+      for (const id of task.payload.sessionIds) {
+        set.add(id)
+      }
+    }
+    return set
+  }, [tasks])
+
+  const contentCards = useMemo(() => {
+    const scopeSessions = sessions.filter(session => session.kind === 'private' || session.kind === 'group')
+    const total = scopeSessions.length
+
+    return [
+      { type: 'text' as ContentType, icon: MessageSquareText },
+      { type: 'voice' as ContentType, icon: Mic },
+      { type: 'image' as ContentType, icon: ImageIcon },
+      { type: 'video' as ContentType, icon: Video },
+      { type: 'emoji' as ContentType, icon: WandSparkles }
+    ].map(item => {
+      let exported = 0
+      for (const session of scopeSessions) {
+        if (lastExportByContent[`${session.username}::${item.type}`]) {
+          exported += 1
+        }
+      }
+
+      return {
+        ...item,
+        label: contentTypeLabels[item.type],
+        total,
+        exported
+      }
+    })
+  }, [sessions, lastExportByContent])
+
+  const activeTabLabel = useMemo(() => {
+    if (activeTab === 'private') return '私聊'
+    if (activeTab === 'group') return '群聊'
+    return '公众号'
+  }, [activeTab])
+
+  const renderSessionName = (session: SessionRow) => {
+    return (
+      <div className="session-cell">
+        <div className="session-avatar">
+          {session.avatarUrl ? <img src={session.avatarUrl} alt="" /> : <span>{getAvatarLetter(session.displayName || session.username)}</span>}
+        </div>
+        <div className="session-meta">
+          <div className="session-name">{session.displayName || session.username}</div>
+          <div className="session-id">{session.wechatId || session.username}</div>
+        </div>
+      </div>
+    )
+  }
+
+  const renderActionCell = (session: SessionRow) => {
+    const isRunning = runningSessionIds.has(session.username)
+    const isQueued = queuedSessionIds.has(session.username)
+    const recent = formatRecentExportTime(lastExportBySession[session.username], nowTick)
+
+    return (
+      <div className="row-action-cell">
+        <button
+          className={`row-export-btn ${isRunning ? 'running' : ''}`}
+          disabled={isRunning}
+          onClick={() => openSingleExport(session)}
+        >
+          {isRunning ? (
+            <>
+              <Loader2 size={14} className="spin" />
+              导出中
+            </>
+          ) : isQueued ? '排队中' : '导出'}
+        </button>
+        <span className="row-export-time">{recent}</span>
+      </div>
+    )
+  }
+
+  const renderTableHeader = () => {
+    if (activeTab === 'private') {
+      return (
+        <tr>
+          <th className="sticky-col">选择</th>
+          <th>会话名（头像/昵称/微信号）</th>
+          <th>总消息</th>
+          <th>语音</th>
+          <th>图片</th>
+          <th>视频</th>
+          <th>表情包</th>
+          <th>共同群聊数</th>
+          <th>最早时间</th>
+          <th>最新时间</th>
+          <th className="sticky-right">操作</th>
+        </tr>
+      )
+    }
+
+    if (activeTab === 'group') {
+      return (
+        <tr>
+          <th className="sticky-col">选择</th>
+          <th>会话名（群头像/群名称/群ID）</th>
+          <th>总消息</th>
+          <th>语音</th>
+          <th>图片</th>
+          <th>视频</th>
+          <th>表情包</th>
+          <th>我发的消息数</th>
+          <th>群人数</th>
+          <th>群发言人数</th>
+          <th>群共同好友数</th>
+          <th>最早时间</th>
+          <th>最新时间</th>
+          <th className="sticky-right">操作</th>
+        </tr>
+      )
+    }
+
+    return (
+      <tr>
+        <th className="sticky-col">选择</th>
+        <th>会话名（头像/名称/微信号）</th>
+        <th>总消息</th>
+        <th>语音</th>
+        <th>图片</th>
+        <th>视频</th>
+        <th>表情包</th>
+        <th>最早时间</th>
+        <th>最新时间</th>
+        <th className="sticky-right">操作</th>
+      </tr>
+    )
+  }
+
+  const renderRow = (session: SessionRow) => {
+    const metrics = sessionMetrics[session.username] || {}
+    const checked = selectedSessions.has(session.username)
+
+    return (
+      <tr key={session.username} className={checked ? 'selected-row' : ''}>
+        <td className="sticky-col">
+          <button
+            className={`select-icon-btn ${checked ? 'checked' : ''}`}
+            onClick={() => toggleSelectSession(session.username)}
+            title={checked ? '取消选择' : '选择会话'}
+          >
+            {checked ? <CheckSquare size={16} /> : <Square size={16} />}
+          </button>
+        </td>
+
+        <td>{renderSessionName(session)}</td>
+        <td>{valueOrDash(metrics.totalMessages)}</td>
+        <td>{valueOrDash(metrics.voiceMessages)}</td>
+        <td>{valueOrDash(metrics.imageMessages)}</td>
+        <td>{valueOrDash(metrics.videoMessages)}</td>
+        <td>{valueOrDash(metrics.emojiMessages)}</td>
+
+        {activeTab === 'private' && (
+          <>
+            <td>{valueOrDash(metrics.privateMutualGroups)}</td>
+            <td>{timestampOrDash(metrics.firstTimestamp)}</td>
+            <td>{timestampOrDash(metrics.lastTimestamp)}</td>
+          </>
+        )}
+
+        {activeTab === 'group' && (
+          <>
+            <td>{valueOrDash(metrics.groupMyMessages)}</td>
+            <td>{valueOrDash(metrics.groupMemberCount)}</td>
+            <td>{valueOrDash(metrics.groupActiveSpeakers)}</td>
+            <td>{valueOrDash(metrics.groupMutualFriends)}</td>
+            <td>{timestampOrDash(metrics.firstTimestamp)}</td>
+            <td>{timestampOrDash(metrics.lastTimestamp)}</td>
+          </>
+        )}
+
+        {activeTab === 'official' && (
+          <>
+            <td>{timestampOrDash(metrics.firstTimestamp)}</td>
+            <td>{timestampOrDash(metrics.lastTimestamp)}</td>
+          </>
+        )}
+
+        <td className="sticky-right">{renderActionCell(session)}</td>
+      </tr>
+    )
+  }
+
+  const visibleSelectedCount = useMemo(() => {
+    const visibleSet = new Set(visibleSessions.map(session => session.username))
+    let count = 0
+    for (const id of selectedSessions) {
+      if (visibleSet.has(id)) count += 1
+    }
+    return count
+  }, [visibleSessions, selectedSessions])
+
+  const writeLayoutLabel = writeLayoutOptions.find(option => option.value === writeLayout)?.label || 'A（类型分目录）'
 
   return (
-    <div className="export-page">
-      <div className="session-panel">
-        <div className="panel-header">
-          <h2>选择会话</h2>
-          <button className="icon-btn" onClick={loadSessions} disabled={isLoading}>
-            <RefreshCw size={18} className={isLoading ? 'spin' : ''} />
-          </button>
-        </div>
-
-        <div className="search-bar">
-          <Search size={16} />
-          <input
-            type="text"
-            placeholder="搜索联系人或群组..."
-            value={searchKeyword}
-            onChange={e => setSearchKeyword(e.target.value)}
-          />
-          {searchKeyword && (
-            <button className="clear-btn" onClick={() => setSearchKeyword('')}>
-              <X size={14} />
-            </button>
-          )}
-        </div>
-
-        <div className="select-actions">
-          <button className="select-all-btn" onClick={toggleSelectAll}>
-            {selectedSessions.size === filteredSessions.length && filteredSessions.length > 0 ? '取消全选' : '全选'}
-          </button>
-          <span className="selected-count">已选 {selectedSessions.size} 个</span>
-        </div>
-
-        {isLoading ? (
-          <div className="loading-state">
-            <Loader2 size={24} className="spin" />
-            <span>加载中...</span>
+    <div className="export-board-page">
+      <div className="export-top-panel">
+        <div className="current-user-box">
+          <div className="avatar-wrap">
+            {currentUser.avatarUrl ? <img src={currentUser.avatarUrl} alt="" /> : <span>{getAvatarLetter(currentUser.displayName)}</span>}
           </div>
-        ) : filteredSessions.length === 0 ? (
-          <div className="empty-state">
-            <span>暂无会话</span>
+          <div className="user-meta">
+            <div className="user-name">{currentUser.displayName}</div>
+            <div className="user-wxid">{currentUser.wxid || 'wxid 未识别'}</div>
           </div>
-        ) : (
-          <div className="export-session-list">
-            {filteredSessions.map(session => (
-              <div
-                key={session.username}
-                className={`export-session-item ${selectedSessions.has(session.username) ? 'selected' : ''}`}
-                onClick={() => toggleSession(session.username)}
+        </div>
+
+        <div className="global-export-controls">
+          <div className="path-control">
+            <span className="control-label">导出位置</span>
+            <div className="path-value" title={exportFolder}>{exportFolder || '未设置'}</div>
+            <div className="path-actions">
+              <button className="secondary-btn" onClick={() => exportFolder && void window.electronAPI.shell.openPath(exportFolder)}>
+                <ExternalLink size={14} /> 打开目录
+              </button>
+              <button
+                className="secondary-btn"
+                onClick={async () => {
+                  const result = await window.electronAPI.dialog.openFile({
+                    title: '选择导出目录',
+                    properties: ['openDirectory']
+                  })
+                  if (!result.canceled && result.filePaths.length > 0) {
+                    const nextPath = result.filePaths[0]
+                    setExportFolder(nextPath)
+                    await configService.setExportPath(nextPath)
+                  }
+                }}
               >
-                <div className="check-box">
-                  {selectedSessions.has(session.username) && <Check size={14} />}
+                <FolderOpen size={14} /> 更换目录
+              </button>
+            </div>
+          </div>
+
+          <div className="write-layout-control">
+            <span className="control-label">写入格式</span>
+            <button className="layout-trigger" onClick={() => setShowWriteLayoutSelect(prev => !prev)}>
+              {writeLayoutLabel}
+            </button>
+            {showWriteLayoutSelect && (
+              <div className="layout-dropdown">
+                {writeLayoutOptions.map(option => (
+                  <button
+                    key={option.value}
+                    className={`layout-option ${writeLayout === option.value ? 'active' : ''}`}
+                    onClick={async () => {
+                      setWriteLayout(option.value)
+                      setShowWriteLayoutSelect(false)
+                      await configService.setExportWriteLayout(option.value)
+                    }}
+                  >
+                    <span className="layout-option-label">{option.label}</span>
+                    <span className="layout-option-desc">{option.desc}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="content-card-grid">
+        {contentCards.map(card => {
+          const Icon = card.icon
+          return (
+            <div key={card.type} className="content-card">
+              <div className="card-header">
+                <div className="card-title"><Icon size={16} /> {card.label}</div>
+              </div>
+              <div className="card-stats">
+                <div className="stat-item">
+                  <span>总会话数</span>
+                  <strong>{card.total}</strong>
                 </div>
-                <div className="export-avatar">
-                  {session.avatarUrl ? (
-                    <img src={session.avatarUrl} alt="" />
-                  ) : (
-                    <span>{getAvatarLetter(session.displayName || session.username)}</span>
+                <div className="stat-item">
+                  <span>已导出会话数</span>
+                  <strong>{card.exported}</strong>
+                </div>
+              </div>
+              <button className="card-export-btn" onClick={() => openContentExport(card.type)}>导出</button>
+            </div>
+          )
+        })}
+      </div>
+
+      <div className="task-center">
+        <div className="section-title">任务中心</div>
+        {tasks.length === 0 ? (
+          <div className="task-empty">暂无任务。点击会话导出或卡片导出后会在这里创建任务。</div>
+        ) : (
+          <div className="task-list">
+            {tasks.map(task => (
+              <div key={task.id} className={`task-card ${task.status}`}>
+                <div className="task-main">
+                  <div className="task-title">{task.title}</div>
+                  <div className="task-meta">
+                    <span className={`task-status ${task.status}`}>{task.status === 'queued' ? '排队中' : task.status === 'running' ? '进行中' : task.status === 'success' ? '已完成' : '失败'}</span>
+                    <span>{new Date(task.createdAt).toLocaleString('zh-CN')}</span>
+                  </div>
+                  {task.status === 'running' && (
+                    <>
+                      <div className="task-progress-bar">
+                        <div
+                          className="task-progress-fill"
+                          style={{ width: `${task.progress.total > 0 ? (task.progress.current / task.progress.total) * 100 : 0}%` }}
+                        />
+                      </div>
+                      <div className="task-progress-text">
+                        {task.progress.current} / {task.progress.total || task.payload.sessionIds.length}
+                        {task.progress.phaseLabel ? ` · ${task.progress.phaseLabel}` : ''}
+                      </div>
+                    </>
                   )}
+                  {task.status === 'error' && <div className="task-error">{task.error || '任务失败'}</div>}
                 </div>
-                <div className="export-session-info">
-                  <div className="export-session-name">{session.displayName || session.username}</div>
-                  <div className="export-session-summary">{session.summary || '暂无消息'}</div>
+                <div className="task-actions">
+                  <button className="secondary-btn" onClick={() => exportFolder && void window.electronAPI.shell.openPath(exportFolder)}>
+                    <FolderOpen size={14} /> 目录
+                  </button>
                 </div>
               </div>
             ))}
@@ -614,591 +1207,206 @@ function ExportPage() {
         )}
       </div>
 
-      <div className="settings-panel">
-        <div className="panel-header">
-          <h2>导出设置</h2>
-        </div>
-
-        <div className="settings-content">
-          <div className="setting-section">
-            <h3>导出格式</h3>
-            <div className="format-options">
-              {formatOptions.map(fmt => (
-                <div
-                  key={fmt.value}
-                  className={`format-card ${options.format === fmt.value ? 'active' : ''}`}
-                  onClick={() => handleFormatChange(fmt.value as ExportOptions['format'])}
-                >
-                  <fmt.icon size={24} />
-                  <span className="format-label">{fmt.label}</span>
-                  <span className="format-desc">{fmt.desc}</span>
-                </div>
-              ))}
-            </div>
+      <div className="session-table-section">
+        <div className="table-toolbar">
+          <div className="table-tabs" role="tablist" aria-label="会话类型">
+            <button className={`tab-btn ${activeTab === 'private' ? 'active' : ''}`} onClick={() => setActiveTab('private')}>私聊</button>
+            <button className={`tab-btn ${activeTab === 'group' ? 'active' : ''}`} onClick={() => setActiveTab('group')}>群聊</button>
+            <button className={`tab-btn ${activeTab === 'official' ? 'active' : ''}`} onClick={() => setActiveTab('official')}>公众号</button>
           </div>
 
-          <div className="setting-section">
-            <h3>时间范围</h3>
-            <p className="setting-subtitle">选择要导出的消息时间区间</p>
-            <div className="media-options-card">
-              <div className="media-switch-row">
-                <div className="media-switch-info">
-                  <span className="media-switch-title">导出全部时间</span>
-                  <span className="media-switch-desc">关闭此项以选择特定的起止日期</span>
-                </div>
+          <div className="toolbar-actions">
+            <div className="search-input-wrap">
+              <Search size={14} />
+              <input
+                value={searchKeyword}
+                onChange={(event) => setSearchKeyword(event.target.value)}
+                placeholder={`搜索${activeTabLabel}会话...`}
+              />
+              {searchKeyword && (
+                <button className="clear-search" onClick={() => setSearchKeyword('')}>
+                  <X size={12} />
+                </button>
+              )}
+            </div>
+
+            <button className="secondary-btn" onClick={toggleSelectAllVisible}>
+              {visibleSelectedCount > 0 && visibleSelectedCount === visibleSessions.length ? '取消全选' : '全选当前'}
+            </button>
+
+            {selectedCount > 0 && (
+              <div className="selected-batch-actions">
+                <span>已选中 {selectedCount} 个会话</span>
+                <button className="primary-btn" onClick={openBatchExport}>
+                  <Download size={14} /> 导出
+                </button>
+                <button className="secondary-btn" onClick={clearSelection}>清空</button>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="table-wrap">
+          <table className="session-table">
+            <thead>{renderTableHeader()}</thead>
+            <tbody>
+              {isLoading ? (
+                <tr>
+                  <td colSpan={activeTab === 'group' ? 14 : activeTab === 'private' ? 11 : 10}>
+                    <div className="table-state"><Loader2 size={16} className="spin" />加载中...</div>
+                  </td>
+                </tr>
+              ) : visibleSessions.length === 0 ? (
+                <tr>
+                  <td colSpan={activeTab === 'group' ? 14 : activeTab === 'private' ? 11 : 10}>
+                    <div className="table-state">暂无会话</div>
+                  </td>
+                </tr>
+              ) : (
+                visibleSessions.map(renderRow)
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {exportDialog.open && (
+        <div className="export-dialog-overlay" onClick={closeExportDialog}>
+          <div className="export-dialog" onClick={(event) => event.stopPropagation()}>
+            <div className="dialog-header">
+              <h3>{exportDialog.title}</h3>
+              <button className="close-icon-btn" onClick={closeExportDialog}><X size={16} /></button>
+            </div>
+
+            <div className="dialog-section">
+              <h4>导出范围</h4>
+              <div className="scope-tag-row">
+                <span className="scope-tag">{exportDialog.scope === 'single' ? '单会话' : exportDialog.scope === 'multi' ? '多会话' : `按内容批量（${contentTypeLabels[exportDialog.contentType || 'text']}）`}</span>
+                <span className="scope-count">共 {exportDialog.sessionIds.length} 个会话</span>
+              </div>
+              <div className="scope-list">
+                {exportDialog.sessionNames.slice(0, 20).map(name => (
+                  <span key={name} className="scope-item">{name}</span>
+                ))}
+                {exportDialog.sessionNames.length > 20 && <span className="scope-item">... 还有 {exportDialog.sessionNames.length - 20} 个</span>}
+              </div>
+            </div>
+
+            <div className="dialog-section">
+              <h4>对话文本导出格式选择</h4>
+              <div className="format-grid">
+                {formatOptions.map(option => (
+                  <button
+                    key={option.value}
+                    className={`format-card ${options.format === option.value ? 'active' : ''}`}
+                    onClick={() => setOptions(prev => ({ ...prev, format: option.value }))}
+                  >
+                    <div className="format-label">{option.label}</div>
+                    <div className="format-desc">{option.desc}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="dialog-section">
+              <h4>时间范围</h4>
+              <div className="switch-row">
+                <span>导出全部时间</span>
                 <label className="switch">
                   <input
                     type="checkbox"
                     checked={options.useAllTime}
-                    onChange={e => setOptions({ ...options, useAllTime: e.target.checked })}
+                    onChange={(event) => setOptions(prev => ({ ...prev, useAllTime: event.target.checked }))}
                   />
                   <span className="switch-slider"></span>
                 </label>
               </div>
 
               {!options.useAllTime && options.dateRange && (
-                <>
-                  <div className="media-option-divider"></div>
-                  <div className="time-range-picker-item" onClick={() => setShowDatePicker(true)}>
-                    <div className="time-picker-info">
-                      <Calendar size={16} />
-                      <span>{formatDate(options.dateRange.start)} - {formatDate(options.dateRange.end)}</span>
-                    </div>
-                    <ChevronDown size={14} />
-                  </div>
-                </>
+                <div className="date-range-row">
+                  <label>
+                    开始
+                    <input
+                      type="date"
+                      value={formatDateInputValue(options.dateRange.start)}
+                      onChange={(event) => {
+                        const start = parseDateInput(event.target.value, false)
+                        setOptions(prev => ({
+                          ...prev,
+                          dateRange: prev.dateRange ? {
+                            start,
+                            end: prev.dateRange.end < start ? parseDateInput(event.target.value, true) : prev.dateRange.end
+                          } : { start, end: new Date() }
+                        }))
+                      }}
+                    />
+                  </label>
+                  <label>
+                    结束
+                    <input
+                      type="date"
+                      value={formatDateInputValue(options.dateRange.end)}
+                      onChange={(event) => {
+                        const end = parseDateInput(event.target.value, true)
+                        setOptions(prev => ({
+                          ...prev,
+                          dateRange: prev.dateRange ? {
+                            start: prev.dateRange.start > end ? parseDateInput(event.target.value, false) : prev.dateRange.start,
+                            end
+                          } : { start: new Date(), end }
+                        }))
+                      }}
+                    />
+                  </label>
+                </div>
               )}
             </div>
-          </div>
 
-          {/* 发送者名称显示偏好 */}
-          {(options.format === 'html' || options.format === 'json' || options.format === 'txt') && (
-            <div className="setting-section">
-              <h3>发送者名称显示</h3>
-              <p className="setting-subtitle">选择导出时优先显示的名称</p>
-              <div className="select-field" ref={displayNameDropdownRef}>
-                <button
-                  type="button"
-                  className={`select-trigger ${showDisplayNameSelect ? 'open' : ''}`}
-                  onClick={() => setShowDisplayNameSelect(!showDisplayNameSelect)}
-                >
-                  <span className="select-value">{displayNameLabel}</span>
-                  <ChevronDown size={16} />
-                </button>
-                {showDisplayNameSelect && (
-                  <div className="select-dropdown">
-                    {displayNameOptions.map(option => (
-                      <button
-                        key={option.value}
-                        type="button"
-                        className={`select-option ${options.displayNamePreference === option.value ? 'active' : ''}`}
-                        onClick={() => {
-                          setOptions({
-                            ...options,
-                            displayNamePreference: option.value as ExportOptions['displayNamePreference']
-                          })
-                          setShowDisplayNameSelect(false)
-                        }}
-                      >
-                        <span className="option-label">{option.label}</span>
-                        <span className="option-desc">{option.desc}</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-          <div className="setting-section">
-            <h3>媒体文件</h3>
-            <p className="setting-subtitle">导出图片/语音/视频/表情并在记录内写入相对路径</p>
-            <div className="media-options-card">
-              <div className="media-switch-row">
-                <div className="media-switch-info">
-                  <span className="media-switch-title">导出媒体文件</span>
-                  <span className="media-switch-desc">会创建子文件夹并保存媒体资源</span>
-                </div>
+            <div className="dialog-section">
+              <h4>媒体与头像</h4>
+              <div className="switch-row">
+                <span>导出媒体文件</span>
                 <label className="switch">
                   <input
                     type="checkbox"
                     checked={options.exportMedia}
-                    onChange={e => setOptions({ ...options, exportMedia: e.target.checked })}
+                    onChange={(event) => setOptions(prev => ({ ...prev, exportMedia: event.target.checked }))}
                   />
                   <span className="switch-slider"></span>
                 </label>
               </div>
 
-              <div className="media-option-divider"></div>
-
-              <label className={`media-checkbox-row ${!options.exportMedia ? 'disabled' : ''}`}>
-                <div className="media-checkbox-info">
-                  <span className="media-checkbox-title">图片</span>
-                  <span className="media-checkbox-desc">已有文件直接复制，缺失时尝试解密</span>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={options.exportImages}
-                  disabled={!options.exportMedia}
-                  onChange={e => setOptions({ ...options, exportImages: e.target.checked })}
-                />
-              </label>
-
-              <div className="media-option-divider"></div>
-
-              <label className={`media-checkbox-row ${!options.exportMedia ? 'disabled' : ''}`}>
-                <div className="media-checkbox-info">
-                  <span className="media-checkbox-title">语音</span>
-                  <span className="media-checkbox-desc">缺失时会解码生成 MP3</span>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={options.exportVoices}
-                  disabled={!options.exportMedia}
-                  onChange={e => setOptions({ ...options, exportVoices: e.target.checked })}
-                />
-              </label>
-
-              <div className="media-option-divider"></div>
-
-              <label className="media-checkbox-row">
-                <div className="media-checkbox-info">
-                  <span className="media-checkbox-title">语音转文字</span>
-                  <span className="media-checkbox-desc">将语音消息转换为文字导出</span>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={options.exportVoiceAsText}
-                  onChange={e => setOptions({ ...options, exportVoiceAsText: e.target.checked })}
-                />
-              </label>
-
-              <div className="media-option-divider"></div>
-
-              <label className={`media-checkbox-row ${!options.exportMedia ? 'disabled' : ''}`}>
-                <div className="media-checkbox-info">
-                  <span className="media-checkbox-title">视频</span>
-                  <span className="media-checkbox-desc">直接复制视频文件到导出目录</span>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={options.exportVideos}
-                  disabled={!options.exportMedia}
-                  onChange={e => setOptions({ ...options, exportVideos: e.target.checked })}
-                />
-              </label>
-
-              <div className="media-option-divider"></div>
-
-              <label className={`media-checkbox-row ${!options.exportMedia ? 'disabled' : ''}`}>
-                <div className="media-checkbox-info">
-                  <span className="media-checkbox-title">表情</span>
-                  <span className="media-checkbox-desc">本地无缓存时尝试下载</span>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={options.exportEmojis}
-                  disabled={!options.exportMedia}
-                  onChange={e => setOptions({ ...options, exportEmojis: e.target.checked })}
-                />
-              </label>
-            </div>
-          </div>
-
-          <div className="setting-section">
-            <h3>头像</h3>
-            <p className="setting-subtitle">可选导出头像索引，关闭则不下载头像</p>
-            <div className="media-options-card">
-              <div className="media-switch-row">
-                <div className="media-switch-info">
-                  <span className="media-switch-title">导出头像</span>
-                  <span className="media-switch-desc">用于展示发送者头像，可能会读取或下载头像文件</span>
-                </div>
-                <label className="switch">
-                  <input
-                    type="checkbox"
-                    checked={options.exportAvatars}
-                    onChange={e => setOptions({ ...options, exportAvatars: e.target.checked })}
-                  />
-                  <span className="switch-slider"></span>
-                </label>
+              <div className="media-check-grid">
+                <label><input type="checkbox" checked={options.exportImages} disabled={!options.exportMedia} onChange={event => setOptions(prev => ({ ...prev, exportImages: event.target.checked }))} /> 图片</label>
+                <label><input type="checkbox" checked={options.exportVoices} disabled={!options.exportMedia} onChange={event => setOptions(prev => ({ ...prev, exportVoices: event.target.checked }))} /> 语音</label>
+                <label><input type="checkbox" checked={options.exportVideos} disabled={!options.exportMedia} onChange={event => setOptions(prev => ({ ...prev, exportVideos: event.target.checked }))} /> 视频</label>
+                <label><input type="checkbox" checked={options.exportEmojis} disabled={!options.exportMedia} onChange={event => setOptions(prev => ({ ...prev, exportEmojis: event.target.checked }))} /> 表情包</label>
+                <label><input type="checkbox" checked={options.exportVoiceAsText} onChange={event => setOptions(prev => ({ ...prev, exportVoiceAsText: event.target.checked }))} /> 语音转文字</label>
+                <label><input type="checkbox" checked={options.exportAvatars} onChange={event => setOptions(prev => ({ ...prev, exportAvatars: event.target.checked }))} /> 导出头像</label>
               </div>
             </div>
-          </div>
 
-          <div className="setting-section">
-            <h3>导出位置</h3>
-            <div className="export-path-display">
-              <FolderOpen size={16} />
-              <span>{exportFolder || '未设置'}</span>
-            </div>
-            <button
-              className="select-folder-btn"
-              onClick={async () => {
-                try {
-                  const result = await window.electronAPI.dialog.openFile({
-                    title: '选择导出目录',
-                    properties: ['openDirectory']
-                  })
-                  if (!result.canceled && result.filePaths.length > 0) {
-                    setExportFolder(result.filePaths[0])
-                    await configService.setExportPath(result.filePaths[0])
-                  }
-                } catch (e) {
-                  console.error('选择目录失败:', e)
-                }
-              }}
-            >
-              <FolderOpen size={16} />
-              <span>选择导出目录</span>
-            </button>
-          </div>
-        </div>
-
-        <div className="export-action">
-          <button
-            className="export-btn"
-            onClick={startExport}
-            disabled={selectedSessions.size === 0 || !exportFolder || isExporting}
-          >
-            {isExporting ? (
-              <>
-                <Loader2 size={18} className="spin" />
-                <span>导出中 ({exportProgress.current}/{exportProgress.total})</span>
-              </>
-            ) : (
-              <>
-                <Download size={18} />
-                <span>开始导出</span>
-              </>
-            )}
-          </button>
-        </div>
-      </div>
-
-      {/* 媒体导出布局选择弹窗 */}
-      {showMediaLayoutPrompt && (
-        <div className="export-overlay" onClick={() => setShowMediaLayoutPrompt(false)}>
-          <div className="export-layout-modal" onClick={e => e.stopPropagation()}>
-            <h3>导出文件夹布局</h3>
-            <p className="layout-subtitle">检测到同时导出多个会话并包含媒体文件，请选择存放方式：</p>
-            <div className="layout-options">
-              <button
-                className="layout-option-btn primary"
-                onClick={() => {
-                  setShowMediaLayoutPrompt(false)
-                  runExport('shared')
-                }}
-              >
-                <span className="layout-title">所有会话在同一文件夹</span>
-                <span className="layout-desc">媒体会按会话名归档到 media 子目录</span>
-              </button>
-              <button
-                className="layout-option-btn"
-                onClick={() => {
-                  setShowMediaLayoutPrompt(false)
-                  runExport('per-session')
-                }}
-              >
-                <span className="layout-title">每个会话一个文件夹</span>
-                <span className="layout-desc">每个会话单独包含导出文件和媒体</span>
-              </button>
-            </div>
-            <div className="layout-actions">
-              <button className="layout-cancel-btn" onClick={() => setShowMediaLayoutPrompt(false)}>
-                取消
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* 导出前预估弹窗 */}
-      {showPreExportDialog && (
-        <div className="export-overlay">
-          <div className="export-layout-modal" onClick={e => e.stopPropagation()}>
-            <h3>导出预估</h3>
-            {isLoadingStats ? (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '24px 0', justifyContent: 'center' }}>
-                <Loader2 size={20} className="spin" />
-                <span style={{ fontSize: 14, color: 'var(--text-secondary)' }}>正在统计消息，可直接点击“直接导出”跳过等待</span>
-              </div>
-            ) : preExportStats ? (
-              <div style={{ padding: '12px 0' }}>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px 24px', fontSize: 14 }}>
-                  <div>
-                    <span style={{ color: 'var(--text-secondary)' }}>会话数</span>
-                    <div style={{ fontWeight: 600, fontSize: 18, marginTop: 2 }}>{selectedSessions.size}</div>
-                  </div>
-                  <div>
-                    <span style={{ color: 'var(--text-secondary)' }}>总消息</span>
-                    <div style={{ fontWeight: 600, fontSize: 18, marginTop: 2 }}>{preExportStats.totalMessages.toLocaleString()}</div>
-                  </div>
-                  {options.exportVoiceAsText && preExportStats.voiceMessages > 0 && (
-                    <>
-                      <div>
-                        <span style={{ color: 'var(--text-secondary)' }}>语音消息</span>
-                        <div style={{ fontWeight: 600, fontSize: 18, marginTop: 2 }}>{preExportStats.voiceMessages}</div>
-                      </div>
-                      <div>
-                        <span style={{ color: 'var(--text-secondary)' }}>已有缓存</span>
-                        <div style={{ fontWeight: 600, fontSize: 18, marginTop: 2, color: 'var(--primary)' }}>{preExportStats.cachedVoiceCount}</div>
-                      </div>
-                    </>
-                  )}
-                </div>
-                {options.exportVoiceAsText && preExportStats.needTranscribeCount > 0 && (
-                  <div style={{ marginTop: 16, padding: '10px 12px', background: 'var(--bg-tertiary)', borderRadius: 8, fontSize: 13 }}>
-                    <span style={{ color: 'var(--text-warning, #e6a23c)' }}>⚠</span>
-                    {' '}需要转写 <b>{preExportStats.needTranscribeCount}</b> 条语音，预计耗时约 <b>{preExportStats.estimatedSeconds > 60
-                      ? `${Math.round(preExportStats.estimatedSeconds / 60)} 分钟`
-                      : `${preExportStats.estimatedSeconds} 秒`
-                    }</b>
-                  </div>
-                )}
-                {options.exportVoiceAsText && preExportStats.voiceMessages > 0 && preExportStats.needTranscribeCount === 0 && (
-                  <div style={{ marginTop: 16, padding: '10px 12px', background: 'var(--bg-tertiary)', borderRadius: 8, fontSize: 13 }}>
-                    <span style={{ color: 'var(--text-success, #67c23a)' }}>✓</span>
-                    {' '}所有 {preExportStats.voiceMessages} 条语音已有转写缓存，无需重新转写
-                  </div>
-                )}
-              </div>
-            ) : (
-              <p style={{ fontSize: 14, color: 'var(--text-secondary)', padding: '16px 0' }}>统计信息获取失败，仍可继续导出</p>
-            )}
-            <div className="layout-actions" style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 8 }}>
-              <button className="layout-cancel-btn" onClick={() => { statsRequestIdRef.current++; setIsLoadingStats(false); setShowPreExportDialog(false); setPreExportStats(null) }}>
-                取消
-              </button>
-              <button className="layout-option-btn primary" onClick={confirmExport}>
-                <span className="layout-title">{isLoadingStats ? '直接导出' : '开始导出'}</span>
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* 导出进度弹窗 */}
-      {isExporting && (
-        <div className="export-overlay">
-          <div className="export-progress-modal">
-            <div className="progress-spinner">
-              <Loader2 size={32} className="spin" />
-            </div>
-            <h3>正在导出</h3>
-            <p className="progress-text">{exportProgress.currentName}</p>
-            {exportProgress.phaseLabel && (
-              <p className="progress-phase-label" style={{ fontSize: 13, color: 'var(--text-secondary)', margin: '4px 0 8px' }}>
-                {exportProgress.phaseLabel}
-              </p>
-            )}
-            {exportProgress.phaseTotal > 0 && (
-              <div className="progress-bar" style={{ marginBottom: 8 }}>
-                <div
-                  className="progress-fill"
-                  style={{ width: `${(exportProgress.phaseProgress / exportProgress.phaseTotal) * 100}%`, background: 'var(--primary-light, #79bbff)' }}
-                />
-              </div>
-            )}
-            <div className="progress-bar">
-              <div
-                className="progress-fill"
-                style={{ width: `${exportProgress.total > 0 ? (exportProgress.current / exportProgress.total) * 100 : 0}%` }}
-              />
-            </div>
-            <p className="progress-count">
-              {exportProgress.current} / {exportProgress.total} 个会话
-              <span style={{ marginLeft: 12, fontSize: 12, color: 'var(--text-secondary)' }}>
-                {elapsedSeconds > 0 && `已用 ${elapsedSeconds >= 60 ? `${Math.floor(elapsedSeconds / 60)}分${elapsedSeconds % 60}秒` : `${elapsedSeconds}秒`}`}
-              </span>
-            </p>
-          </div>
-        </div>
-      )}
-
-      {/* 导出结果弹窗 */}
-      {exportResult && (
-        <div className="export-overlay">
-          <div className="export-result-modal">
-            <div className={`result-icon ${exportResult.success ? 'success' : 'error'}`}>
-              {exportResult.success ? <CheckCircle size={48} /> : <XCircle size={48} />}
-            </div>
-            <h3>{exportResult.success ? '导出完成' : '导出失败'}</h3>
-            {exportResult.success ? (
-              <p className="result-text">
-                成功导出 {exportResult.successCount} 个会话
-                {exportResult.failCount ? `，${exportResult.failCount} 个失败` : ''}
-              </p>
-            ) : (
-              <p className="result-text error">{exportResult.error}</p>
-            )}
-            <div className="result-actions">
-              {exportResult.success && (
-                <button className="open-folder-btn" onClick={openExportFolder}>
-                  <ExternalLink size={16} />
-                  <span>打开文件夹</span>
-                </button>
-              )}
-              <button className="close-btn" onClick={() => setExportResult(null)}>
-                关闭
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* 日期选择弹窗 */}
-      {showDatePicker && (
-        <div className="export-overlay" onClick={() => { setShowDatePicker(false); setShowYearMonthPicker(false) }}>
-          <div className="date-picker-modal" onClick={e => e.stopPropagation()}>
-            <h3>选择时间范围</h3>
-            <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '8px 0 16px 0' }}>
-              点击选择开始和结束日期，系统会自动调整确保时间顺序正确
-            </p>
-            <div className="quick-select">
-              <button
-                className="quick-btn"
-                onClick={() => {
-                  const end = new Date()
-                  const start = new Date(end.getTime() - 7 * 24 * 60 * 60 * 1000)
-                  setOptions({ ...options, dateRange: { start, end } })
-                }}
-              >
-                最近7天
-              </button>
-              <button
-                className="quick-btn"
-                onClick={() => {
-                  const end = new Date()
-                  const start = new Date(end.getTime() - 30 * 24 * 60 * 60 * 1000)
-                  setOptions({ ...options, dateRange: { start, end } })
-                }}
-              >
-                最近30天
-              </button>
-              <button
-                className="quick-btn"
-                onClick={() => {
-                  const end = new Date()
-                  const start = new Date(end.getTime() - 90 * 24 * 60 * 60 * 1000)
-                  setOptions({ ...options, dateRange: { start, end } })
-                }}
-              >
-                最近90天
-              </button>
-            </div>
-            <div className="date-display">
-              <div
-                className={`date-display-item ${selectingStart ? 'active' : ''}`}
-                onClick={() => setSelectingStart(true)}
-              >
-                <span className="date-label">开始日期</span>
-                <span className="date-value">
-                  {options.dateRange?.start?.toLocaleDateString('zh-CN', {
-                    year: 'numeric',
-                    month: '2-digit',
-                    day: '2-digit'
-                  })}
-                </span>
-              </div>
-              <span className="date-separator">至</span>
-              <div
-                className={`date-display-item ${!selectingStart ? 'active' : ''}`}
-                onClick={() => setSelectingStart(false)}
-              >
-                <span className="date-label">结束日期</span>
-                <span className="date-value">
-                  {options.dateRange?.end?.toLocaleDateString('zh-CN', {
-                    year: 'numeric',
-                    month: '2-digit',
-                    day: '2-digit'
-                  })}
-                </span>
-              </div>
-            </div>
-            <div className="calendar-container">
-              <div className="calendar-header">
-                <button
-                  className="calendar-nav-btn"
-                  onClick={() => setCalendarDate(new Date(calendarDate.getFullYear(), calendarDate.getMonth() - 1, 1))}
-                >
-                  <ChevronLeft size={18} />
-                </button>
-                <span className="calendar-month clickable" onClick={() => setShowYearMonthPicker(!showYearMonthPicker)}>
-                  {calendarDate.getFullYear()}年{calendarDate.getMonth() + 1}月
-                </span>
-                <button
-                  className="calendar-nav-btn"
-                  onClick={() => setCalendarDate(new Date(calendarDate.getFullYear(), calendarDate.getMonth() + 1, 1))}
-                >
-                  <ChevronRight size={18} />
-                </button>
-              </div>
-              {showYearMonthPicker ? (
-                <div className="year-month-picker">
-                  <div className="year-selector">
-                    <button className="calendar-nav-btn" onClick={() => setCalendarDate(new Date(calendarDate.getFullYear() - 1, calendarDate.getMonth(), 1))}>
-                      <ChevronLeft size={16} />
-                    </button>
-                    <span className="year-label">{calendarDate.getFullYear()}年</span>
-                    <button className="calendar-nav-btn" onClick={() => setCalendarDate(new Date(calendarDate.getFullYear() + 1, calendarDate.getMonth(), 1))}>
-                      <ChevronRight size={16} />
-                    </button>
-                  </div>
-                  <div className="month-grid">
-                    {['一月','二月','三月','四月','五月','六月','七月','八月','九月','十月','十一月','十二月'].map((name, i) => (
-                      <button
-                        key={i}
-                        className={`month-btn ${i === calendarDate.getMonth() ? 'active' : ''}`}
-                        onClick={() => {
-                          setCalendarDate(new Date(calendarDate.getFullYear(), i, 1))
-                          setShowYearMonthPicker(false)
-                        }}
-                      >{name}</button>
-                    ))}
-                  </div>
-                </div>
-              ) : (
-                <>
-              <div className="calendar-weekdays">
-                {['日', '一', '二', '三', '四', '五', '六'].map(day => (
-                  <div key={day} className="calendar-weekday">{day}</div>
+            <div className="dialog-section">
+              <h4>发送者名称显示</h4>
+              <div className="display-name-options">
+                {displayNameOptions.map(option => (
+                  <label key={option.value} className={`display-name-item ${options.displayNamePreference === option.value ? 'active' : ''}`}>
+                    <input
+                      type="radio"
+                      checked={options.displayNamePreference === option.value}
+                      onChange={() => setOptions(prev => ({ ...prev, displayNamePreference: option.value }))}
+                    />
+                    <span>{option.label}</span>
+                    <small>{option.desc}</small>
+                  </label>
                 ))}
               </div>
-              <div className="calendar-days">
-                {generateCalendar().map((day, index) => {
-                  if (day === null) {
-                    return <div key={`empty-${index}`} className="calendar-day empty" />
-                  }
-
-                  const currentDate = new Date(calendarDate.getFullYear(), calendarDate.getMonth(), day)
-                  const isStart = options.dateRange?.start?.toDateString() === currentDate.toDateString()
-                  const isEnd = options.dateRange?.end?.toDateString() === currentDate.toDateString()
-                  const isInRange = options.dateRange?.start && options.dateRange?.end && currentDate >= options.dateRange.start && currentDate <= options.dateRange.end
-                  const today = new Date()
-                  today.setHours(0, 0, 0, 0)
-                  const isFuture = currentDate > today
-
-                  return (
-                    <div
-                      key={day}
-                      className={`calendar-day ${isStart ? 'start' : ''} ${isEnd ? 'end' : ''} ${isInRange ? 'in-range' : ''} ${isFuture ? 'disabled' : ''}`}
-                      onClick={() => !isFuture && handleDateSelect(day)}
-                      style={{ cursor: isFuture ? 'not-allowed' : 'pointer', opacity: isFuture ? 0.3 : 1 }}
-                    >
-                      {day}
-                    </div>
-                  )
-                })}
-              </div>
-                </>
-              )}
             </div>
-            <div className="date-picker-actions">
-              <button className="cancel-btn" onClick={() => { setShowDatePicker(false); setShowYearMonthPicker(false) }}>
-                取消
-              </button>
-              <button className="confirm-btn" onClick={() => { setShowDatePicker(false); setShowYearMonthPicker(false) }}>
-                确定
+
+            <div className="dialog-actions">
+              <button className="secondary-btn" onClick={closeExportDialog}>取消</button>
+              <button className="primary-btn" onClick={() => void createTask()} disabled={!exportFolder || exportDialog.sessionIds.length === 0}>
+                <Download size={14} /> 创建导出任务
               </button>
             </div>
           </div>

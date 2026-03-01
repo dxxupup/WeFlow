@@ -32,6 +32,9 @@ export const CONFIG_KEYS = {
   EXPORT_DEFAULT_EXCEL_COMPACT_COLUMNS: 'exportDefaultExcelCompactColumns',
   EXPORT_DEFAULT_TXT_COLUMNS: 'exportDefaultTxtColumns',
   EXPORT_DEFAULT_CONCURRENCY: 'exportDefaultConcurrency',
+  EXPORT_WRITE_LAYOUT: 'exportWriteLayout',
+  EXPORT_LAST_SESSION_RUN_MAP: 'exportLastSessionRunMap',
+  EXPORT_LAST_CONTENT_RUN_MAP: 'exportLastContentRunMap',
 
   // 安全
   AUTH_ENABLED: 'authEnabled',
@@ -384,6 +387,52 @@ export async function getExportDefaultConcurrency(): Promise<number | null> {
 // 设置导出默认并发数
 export async function setExportDefaultConcurrency(concurrency: number): Promise<void> {
   await config.set(CONFIG_KEYS.EXPORT_DEFAULT_CONCURRENCY, concurrency)
+}
+
+export type ExportWriteLayout = 'A' | 'B' | 'C'
+
+export async function getExportWriteLayout(): Promise<ExportWriteLayout> {
+  const value = await config.get(CONFIG_KEYS.EXPORT_WRITE_LAYOUT)
+  if (value === 'A' || value === 'B' || value === 'C') return value
+  return 'A'
+}
+
+export async function setExportWriteLayout(layout: ExportWriteLayout): Promise<void> {
+  await config.set(CONFIG_KEYS.EXPORT_WRITE_LAYOUT, layout)
+}
+
+export async function getExportLastSessionRunMap(): Promise<Record<string, number>> {
+  const value = await config.get(CONFIG_KEYS.EXPORT_LAST_SESSION_RUN_MAP)
+  if (!value || typeof value !== 'object') return {}
+  const entries = Object.entries(value as Record<string, unknown>)
+  const map: Record<string, number> = {}
+  for (const [sessionId, raw] of entries) {
+    if (typeof raw === 'number' && Number.isFinite(raw)) {
+      map[sessionId] = raw
+    }
+  }
+  return map
+}
+
+export async function setExportLastSessionRunMap(map: Record<string, number>): Promise<void> {
+  await config.set(CONFIG_KEYS.EXPORT_LAST_SESSION_RUN_MAP, map)
+}
+
+export async function getExportLastContentRunMap(): Promise<Record<string, number>> {
+  const value = await config.get(CONFIG_KEYS.EXPORT_LAST_CONTENT_RUN_MAP)
+  if (!value || typeof value !== 'object') return {}
+  const entries = Object.entries(value as Record<string, unknown>)
+  const map: Record<string, number> = {}
+  for (const [key, raw] of entries) {
+    if (typeof raw === 'number' && Number.isFinite(raw)) {
+      map[key] = raw
+    }
+  }
+  return map
+}
+
+export async function setExportLastContentRunMap(map: Record<string, number>): Promise<void> {
+  await config.set(CONFIG_KEYS.EXPORT_LAST_CONTENT_RUN_MAP, map)
 }
 
 // === 安全相关 ===
