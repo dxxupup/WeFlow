@@ -1413,10 +1413,21 @@ class SnsService {
                     }
                 }
 
+                const ownerWxid = this.toOptionalString(this.configService.get('myWxid'))
+                const ownerIdentity = ownerWxid
+                    ? await this.resolveContactIdentity(ownerWxid, identityCache)
+                    : null
+                const recordOwner = ownerIdentity
+                    ? { ...ownerIdentity }
+                    : ownerWxid
+                        ? { username: ownerWxid, wxid: ownerWxid, displayName: ownerWxid }
+                        : { username: '', wxid: '', displayName: '' }
+
                 const exportData = {
                     exportTime: new Date().toISOString(),
                     format: 'arkmejson',
                     schemaVersion: '1.0.0',
+                    recordOwner,
                     mediaSelection: {
                         images: shouldExportImages,
                         livePhotos: shouldExportLivePhotos,
