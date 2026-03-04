@@ -242,7 +242,7 @@ export interface ElectronAPI {
     }>
     getExportSessionStats: (
       sessionIds: string[],
-      options?: { includeRelations?: boolean; forceRefresh?: boolean; allowStaleCache?: boolean }
+      options?: { includeRelations?: boolean; forceRefresh?: boolean; allowStaleCache?: boolean; preferAccurateSpecialTypes?: boolean }
     ) => Promise<{
       success: boolean
       data?: Record<string, {

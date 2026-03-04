@@ -3499,7 +3499,7 @@ function ExportPage() {
         window.electronAPI.chat.getSessionDetailExtra(normalizedSessionId),
         window.electronAPI.chat.getExportSessionStats(
           [normalizedSessionId],
-          { includeRelations: false, allowStaleCache: true }
+          { includeRelations: false, forceRefresh: true, preferAccurateSpecialTypes: true }
         )
       ])
 
@@ -3549,7 +3549,7 @@ function ExportPage() {
           try {
             const freshResult = await window.electronAPI.chat.getExportSessionStats(
               [normalizedSessionId],
-              { includeRelations: refreshIncludeRelations, forceRefresh: true }
+              { includeRelations: refreshIncludeRelations, forceRefresh: true, preferAccurateSpecialTypes: true }
             )
             if (requestSeq !== detailRequestSeqRef.current) return
             if (freshResult.success && freshResult.data) {
@@ -3591,7 +3591,7 @@ function ExportPage() {
     try {
       const relationResult = await window.electronAPI.chat.getExportSessionStats(
         [normalizedSessionId],
-        { includeRelations: true, allowStaleCache: true }
+        { includeRelations: true, forceRefresh: true, preferAccurateSpecialTypes: true }
       )
       if (requestSeq !== detailRequestSeqRef.current) return
 
@@ -3615,7 +3615,7 @@ function ExportPage() {
           try {
             const freshResult = await window.electronAPI.chat.getExportSessionStats(
               [normalizedSessionId],
-              { includeRelations: true, forceRefresh: true }
+              { includeRelations: true, forceRefresh: true, preferAccurateSpecialTypes: true }
             )
             if (requestSeq !== detailRequestSeqRef.current) return
             if (freshResult.success && freshResult.data) {

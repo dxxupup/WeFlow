@@ -2,7 +2,7 @@ import { join, dirname } from 'path'
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'fs'
 import { ConfigService } from './config'
 
-const CACHE_VERSION = 1
+const CACHE_VERSION = 2
 const MAX_SESSION_ENTRIES_PER_SCOPE = 2000
 const MAX_SCOPE_ENTRIES = 12
 
@@ -53,16 +53,19 @@ function normalizeStats(raw: unknown): SessionStatsCacheStats | null {
   const imageMessages = toNonNegativeInt(source.imageMessages)
   const videoMessages = toNonNegativeInt(source.videoMessages)
   const emojiMessages = toNonNegativeInt(source.emojiMessages)
-  const transferMessages = toNonNegativeInt(source.transferMessages) ?? 0
-  const redPacketMessages = toNonNegativeInt(source.redPacketMessages) ?? 0
-  const callMessages = toNonNegativeInt(source.callMessages) ?? 0
+  const transferMessages = toNonNegativeInt(source.transferMessages)
+  const redPacketMessages = toNonNegativeInt(source.redPacketMessages)
+  const callMessages = toNonNegativeInt(source.callMessages)
 
   if (
     totalMessages === undefined ||
     voiceMessages === undefined ||
     imageMessages === undefined ||
     videoMessages === undefined ||
-    emojiMessages === undefined
+    emojiMessages === undefined ||
+    transferMessages === undefined ||
+    redPacketMessages === undefined ||
+    callMessages === undefined
   ) {
     return null
   }
@@ -154,6 +157,11 @@ export class SessionStatsCacheService {
       }
 
       const payload = parsed as Record<string, unknown>
+      const version = Number(payload.version)
+      if (!Number.isFinite(version) || version !== CACHE_VERSION) {
+        this.store = { version: CACHE_VERSION, scopes: {} }
+        return
+      }
       const scopesRaw = payload.scopes
       if (!scopesRaw || typeof scopesRaw !== 'object') {
         this.store = { version: CACHE_VERSION, scopes: {} }

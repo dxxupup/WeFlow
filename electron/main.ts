@@ -1159,6 +1159,7 @@ function registerIpcHandlers() {
     includeRelations?: boolean
     forceRefresh?: boolean
     allowStaleCache?: boolean
+    preferAccurateSpecialTypes?: boolean
   }) => {
     return chatService.getExportSessionStats(sessionIds, options)
   })

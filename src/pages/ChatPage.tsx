@@ -925,7 +925,7 @@ function ChatPage(_props: ChatPageProps) {
         window.electronAPI.chat.getSessionDetailExtra(normalizedSessionId),
         window.electronAPI.chat.getExportSessionStats(
           [normalizedSessionId],
-          { includeRelations: false, allowStaleCache: true }
+          { includeRelations: false, forceRefresh: true, preferAccurateSpecialTypes: true }
         )
       ])
 
@@ -983,7 +983,7 @@ function ChatPage(_props: ChatPageProps) {
     try {
       const relationResult = await window.electronAPI.chat.getExportSessionStats(
         [normalizedSessionId],
-        { includeRelations: true, allowStaleCache: true }
+        { includeRelations: true, forceRefresh: true, preferAccurateSpecialTypes: true }
       )
       if (requestSeq !== detailRequestSeqRef.current) return
 
@@ -1007,7 +1007,7 @@ function ChatPage(_props: ChatPageProps) {
           try {
             const freshResult = await window.electronAPI.chat.getExportSessionStats(
               [normalizedSessionId],
-              { includeRelations: true, forceRefresh: true }
+              { includeRelations: true, forceRefresh: true, preferAccurateSpecialTypes: true }
             )
             if (requestSeq !== detailRequestSeqRef.current) return
             if (freshResult.success && freshResult.data) {
