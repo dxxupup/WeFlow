@@ -6366,6 +6366,7 @@ function ExportPage() {
                       className="contacts-virtuoso"
                       data={filteredContacts}
                       computeItemKey={(_, contact) => contact.username}
+                      fixedItemHeight={76}
                       itemContent={renderContactRow}
                       rangeChanged={handleContactsRangeChanged}
                       atTopStateChange={setIsContactsListAtTop}
