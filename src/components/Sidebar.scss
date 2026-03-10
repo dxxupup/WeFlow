@@ -43,13 +43,15 @@
 .sidebar-user-card-wrap {
   position: relative;
   margin: 0 12px 10px;
+  --sidebar-user-menu-width: 172px;
 }
 
 .sidebar-user-menu {
   position: absolute;
   left: 0;
-  right: 0;
+  right: auto;
   bottom: calc(100% + 8px);
+  width: max(100%, var(--sidebar-user-menu-width));
   z-index: 12;
   border: 1px solid var(--border-color);
   border-radius: 12px;
